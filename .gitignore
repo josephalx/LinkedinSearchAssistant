@@ -1,0 +1,28 @@
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Generated output
+# matches_export.json is rebuilt by export_matches.py; last_job_debug.html is a
+# scraper page dump. Both hold scraped job data and shouldn't be committed.
+matches_export.json
+last_job_debug.html
+
+# Logs
+*.log

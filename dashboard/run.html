@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Run scraper / matcher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --surface: #14171b;
+    --border: #23262b;
+    --border-strong: #33373d;
+    --text: #e6e4df;
+    --text-dim: #8b9099;
+    --text-faint: #565b62;
+    --accent: #5b8dee;
+    --good: #34d399;
+    --mid: #f5a524;
+    --bad: #f4574e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 2rem 1.5rem 4rem;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  .nav { margin-bottom: 1.5rem; }
+  .nav a {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .nav a:hover { text-decoration: underline; }
+  .prompt {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px;
+    color: var(--text-faint);
+    margin: 0 0 4px;
+  }
+  .prompt .cursor { color: var(--accent); }
+  h1 { font-size: 24px; font-weight: 500; margin: 0 0 2rem; }
+  h2 {
+    font-size: 16px; font-weight: 500;
+    margin: 0 0 1rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--border);
+  }
+  section:first-of-type h2 { border-top: none; padding-top: 0; }
+  .dry-run-badge {
+    display: inline-block;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--mid);
+    border: 1px solid var(--mid);
+    border-radius: 3px;
+    padding: 1px 6px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .run-section {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+  }
+  .run-btn {
+    font-family: inherit; font-size: 15px;
+    padding: 10px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .run-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .run-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .run-indicator { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); }
+  .run-indicator.active { color: var(--mid); }
+  .log-panel {
+    display: none;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 16px;
+    height: 45vh;
+    min-height: 260px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log-panel::-webkit-scrollbar { width: 10px; }
+  .log-panel::-webkit-scrollbar-track { background: transparent; }
+  .log-panel::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 5px; }
+  .log-panel::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+  .log-panel { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+  .log-header { color: var(--accent); font-weight: 500; }
+  .log-ok { color: var(--good); }
+  .log-warn { color: var(--mid); }
+  .log-plain { color: var(--text-dim); }
+  @media (max-width: 640px) {
+    body { padding: 1.25rem 1rem 3rem; }
+    h1 { font-size: 20px; }
+    .log-panel { height: 40vh; min-height: 200px; font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="nav"><a href="dashboard.html">&larr; back to dashboard</a></p>
+  <p class="prompt">job-match-dashboard <span class="cursor">$</span> ./run</p>
+  <h1>Run scraper / matcher</h1>
+
+  <section>
+    <h2>Scraper <span class="dry-run-badge">dry-run &mdash; not saved</span></h2>
+    <div class="run-section">
+      <button class="run-btn" id="scraper-run">Run scraper</button>
+      <button class="run-btn" id="scraper-stop" disabled>Stop</button>
+      <span class="run-indicator" id="scraper-indicator"></span>
+    </div>
+    <pre class="log-panel" id="scraper-log"></pre>
+  </section>
+
+  <section>
+    <h2>Matcher <span class="dry-run-badge">dry-run &mdash; not saved</span></h2>
+    <div class="run-section">
+      <button class="run-btn" id="matcher-run">Run matcher</button>
+      <button class="run-btn" id="matcher-stop" disabled>Stop</button>
+      <span class="run-indicator" id="matcher-indicator"></span>
+    </div>
+    <pre class="log-panel" id="matcher-log"></pre>
+  </section>
+</div>
+
+<script>
+const API_BASE = "http://josephs-macbook-pro.local:5050";
+
+function getToken() {
+  let token = localStorage.getItem("dashboard_token");
+  if (!token) {
+    token = prompt("Enter dashboard token (set on the Mac via keyring):");
+    if (token) localStorage.setItem("dashboard_token", token);
+  }
+  return token;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function classifyLine(line) {
+  if (/^===|^---/.test(line)) return "log-header";
+  if (/skipped|error|failed|excluded/i.test(line)) return "log-warn";
+  if (/parsed \(|^\[\d/.test(line)) return "log-ok";
+  return "log-plain";
+}
+
+const socket = io(API_BASE);
+
+function setupRunner(name) {
+  const runBtn = document.getElementById(name + "-run");
+  const stopBtn = document.getElementById(name + "-stop");
+  const indicator = document.getElementById(name + "-indicator");
+  const logPanel = document.getElementById(name + "-log");
+
+  function appendLine(line) {
+    const cls = classifyLine(line);
+    logPanel.insertAdjacentHTML("beforeend", '<span class="' + cls + '">' + escapeHtml(line) + "</span>");
+  }
+
+  function appendLog(line) {
+    logPanel.style.display = "block";
+    appendLine(line);
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }
+
+  async function loadExistingLog() {
+    try {
+      const resp = await fetch(API_BASE + "/api/logs/" + name);
+      const text = await resp.text();
+      if (text && text !== "no log yet") {
+        logPanel.innerHTML = "";
+        text.split("\n").forEach((line, i, arr) => {
+          appendLine(i < arr.length - 1 ? line + "\n" : line);
+        });
+        logPanel.style.display = "block";
+        logPanel.scrollTop = logPanel.scrollHeight;
+      }
+    } catch (e) { /* ignore — page still works without this */ }
+  }
+
+  function setRunning(isRunning) {
+    runBtn.disabled = isRunning;
+    stopBtn.disabled = !isRunning;
+    if (isRunning) {
+      indicator.textContent = "running...";
+      indicator.classList.add("active");
+    }
+  }
+
+  socket.on(name + "_log", (data) => appendLog(data.line));
+  socket.on(name + "_done", (data) => {
+    indicator.textContent = "finished (exit code " + data.returncode + ")";
+    indicator.classList.remove("active");
+    runBtn.disabled = false;
+    stopBtn.disabled = true;
+  });
+
+  runBtn.addEventListener("click", async () => {
+    const token = getToken();
+    if (!token) return;
+    logPanel.innerHTML = "";
+    setRunning(true);
+    indicator.textContent = "starting...";
+    try {
+      const resp = await fetch(API_BASE + "/api/run-" + name, {
+        method: "POST",
+        headers: { "X-API-Token": token },
+      });
+      if (resp.status === 401) {
+        localStorage.removeItem("dashboard_token");
+        alert("Token rejected — try again.");
+        setRunning(false);
+        indicator.textContent = "";
+        return;
+      }
+      if (resp.status === 409) {
+        indicator.textContent = "already running";
+        return;
+      }
+      indicator.textContent = "running...";
+    } catch (e) {
+      indicator.textContent = "failed to start: " + e.message;
+      indicator.classList.remove("active");
+      setRunning(false);
+    }
+  });
+
+  stopBtn.addEventListener("click", async () => {
+    const token = getToken();
+    if (!token) return;
+    stopBtn.disabled = true;
+    indicator.textContent = "stopping...";
+    try {
+      const resp = await fetch(API_BASE + "/api/stop-" + name, {
+        method: "POST",
+        headers: { "X-API-Token": token },
+      });
+      if (resp.status === 401) {
+        localStorage.removeItem("dashboard_token");
+        alert("Token rejected — try again.");
+        stopBtn.disabled = false;
+        return;
+      }
+      if (resp.status === 409) {
+        indicator.textContent = "nothing running";
+        return;
+      }
+      // the "_done" event fires once the process actually exits
+    } catch (e) {
+      indicator.textContent = "failed to stop: " + e.message;
+    }
+  });
+
+  return { loadExistingLog, setRunning };
+}
+
+async function checkRunStatus(name, runner) {
+  try {
+    const resp = await fetch(API_BASE + "/api/run-status");
+    const data = await resp.json();
+    if (data[name + "_running"]) runner.setRunning(true);
+  } catch (e) { /* ignore */ }
+}
+
+const scraperRunner = setupRunner("scraper");
+const matcherRunner = setupRunner("matcher");
+
+scraperRunner.loadExistingLog();
+matcherRunner.loadExistingLog();
+checkRunStatus("scraper", scraperRunner);
+checkRunStatus("matcher", matcherRunner);
+</script>
+</body>
+</html>
