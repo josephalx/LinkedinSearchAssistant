@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Job match dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='19' font-weight='600' fill='%235b8dee' text-anchor='middle'%3E$%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -150,6 +151,18 @@
     margin-top: 10px;
   }
   .applied-btn:hover { border-color: var(--accent); }
+  .copy-btn {
+    font-family: inherit; font-size: 13px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    margin-left: 8px;
+  }
+  .copy-btn:hover { border-color: var(--accent); }
+  .copy-btn.copied { border-color: var(--good); color: var(--good); }
   .show-applied {
     display: flex; align-items: center; gap: 6px;
     font-size: 15px; color: var(--text-dim);
@@ -312,7 +325,9 @@ function render() {
       '</tr>';
     if (isOpen) {
       rows += '<tr class="detail-row"><td colspan="4">' +
-        '<div><span class="label">missing:</span> ' + (d.missing_skills || "none listed") + '</div>' +
+        '<div><span class="label">' + d.title + '</span>' +
+        '<button class="copy-btn" data-copy-text="' + d.title.replace(/"/g, '&quot;') + '">copy title</button></div>' +
+        '<div style="margin-top:6px;"><span class="label">missing:</span> ' + (d.missing_skills || "none listed") + '</div>' +
         '<div style="margin-top:6px;">' + d.reasoning + '</div>' +
         '<div style="margin-top:6px;"><a href="' + d.url + '" target="_blank">view posting \u2192</a></div>' +
         '<button class="applied-btn" data-job-id="' + d.job_id + '" data-applied="' + (!d.applied) + '">' +
@@ -336,6 +351,25 @@ function render() {
       const jobId = btn.getAttribute("data-job-id");
       const applied = btn.getAttribute("data-applied") === "true";
       toggleApplied(jobId, applied);
+    });
+  });
+
+  document.querySelectorAll(".copy-btn").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const text = btn.getAttribute("data-copy-text");
+      try {
+        await navigator.clipboard.writeText(text);
+        const original = btn.textContent;
+        btn.textContent = "copied!";
+        btn.classList.add("copied");
+        setTimeout(() => {
+          btn.textContent = original;
+          btn.classList.remove("copied");
+        }, 1200);
+      } catch (err) {
+        btn.textContent = "copy failed";
+      }
     });
   });
 }

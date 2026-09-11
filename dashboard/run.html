@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Run scraper / matcher</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='19' font-weight='600' fill='%235b8dee' text-anchor='middle'%3E$%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -65,6 +66,17 @@
     margin-left: 8px;
     vertical-align: middle;
   }
+  .prod-badge {
+    display: inline-block;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--bad);
+    border: 1px solid var(--bad);
+    border-radius: 3px;
+    padding: 1px 6px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
   .run-section {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     margin-bottom: 1.5rem;
@@ -121,7 +133,7 @@
   <h1>Run scraper / matcher</h1>
 
   <section>
-    <h2>Scraper <span class="dry-run-badge">dry-run &mdash; not saved</span></h2>
+    <h2>Scraper <span class="dry-run-badge" id="scraper-mode-badge">checking mode...</span></h2>
     <div class="run-section">
       <button class="run-btn" id="scraper-run">Run scraper</button>
       <button class="run-btn" id="scraper-stop" disabled>Stop</button>
@@ -131,7 +143,7 @@
   </section>
 
   <section>
-    <h2>Matcher <span class="dry-run-badge">dry-run &mdash; not saved</span></h2>
+    <h2>Matcher <span class="dry-run-badge" id="matcher-mode-badge">checking mode...</span></h2>
     <div class="run-section">
       <button class="run-btn" id="matcher-run">Run matcher</button>
       <button class="run-btn" id="matcher-stop" disabled>Stop</button>
@@ -279,7 +291,20 @@ async function checkRunStatus(name, runner) {
     const resp = await fetch(API_BASE + "/api/run-status");
     const data = await resp.json();
     if (data[name + "_running"]) runner.setRunning(true);
-  } catch (e) { /* ignore */ }
+
+    const badge = document.getElementById(name + "-mode-badge");
+    const isDryRun = data[name + "_dry_run"];
+    if (isDryRun) {
+      badge.textContent = "dry-run \u2014 not saved";
+      badge.className = "dry-run-badge";
+    } else {
+      badge.textContent = "prod \u2014 writes to DB";
+      badge.className = "prod-badge";
+    }
+  } catch (e) {
+    const badge = document.getElementById(name + "-mode-badge");
+    badge.textContent = "mode unknown (api unreachable)";
+  }
 }
 
 const scraperRunner = setupRunner("scraper");
