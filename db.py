@@ -33,12 +33,15 @@ def init_db():
             company TEXT,
             url TEXT,
             jd_text TEXT,
+            jd_hash TEXT,
             source_keyword TEXT,
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # In case jobs already exists from before source_keyword was added.
+    # In case jobs already exists from before source_keyword/jd_hash were added.
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_keyword TEXT")
+    cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jd_hash TEXT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_jd_hash ON jobs (jd_hash)")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS matches (
             id SERIAL PRIMARY KEY,
@@ -53,30 +56,65 @@ def init_db():
     """)
     # In case matches already exists from before applied was added.
     cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS applied BOOLEAN DEFAULT FALSE")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS match_benchmark (
+            id SERIAL PRIMARY KEY,
+            job_id TEXT REFERENCES jobs(job_id),
+            classifier_model TEXT,
+            scorer_model TEXT,
+            resume_version TEXT,
+            score INTEGER,
+            missing_skills TEXT,
+            reasoning TEXT,
+            scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
 
 
+def _normalize_for_dedup(text: str) -> str:
+    """Collapse whitespace and lowercase, so trivial formatting differences
+    (extra spaces, capitalization) don't defeat duplicate detection."""
+    return " ".join((text or "").split()).lower()
+
+
+def _jd_hash(jd_text: str) -> str:
+    import hashlib
+    return hashlib.sha256(_normalize_for_dedup(jd_text).encode("utf-8")).hexdigest()
+
+
 def insert_job(job: dict) -> bool:
     """Insert a scraped job. Returns False if job_id already existed, OR if a
-    job with the same (title, company) is already stored — LinkedIn commonly
-    reposts the identical listing under a fresh job_id, which job_id-based
-    dedup alone can't catch."""
+    job with the same normalized (title, company) is already stored, OR if
+    the JD text content itself is an exact duplicate (by hash) — LinkedIn
+    commonly reposts the identical listing under a fresh job_id, sometimes
+    with trivial title formatting differences that a plain string match
+    would miss."""
     conn = get_connection()
     cur = conn.cursor()
     try:
+        jd_hash = _jd_hash(job["jd_text"])
+
         cur.execute(
-            "SELECT 1 FROM jobs WHERE title = %s AND company = %s LIMIT 1",
-            (job["title"], job["company"]),
+            """SELECT 1 FROM jobs
+               WHERE (LOWER(TRIM(title)) = %s AND LOWER(TRIM(company)) = %s)
+                  OR jd_hash = %s
+               LIMIT 1""",
+            (
+                _normalize_for_dedup(job["title"]),
+                _normalize_for_dedup(job["company"]),
+                jd_hash,
+            ),
         )
         if cur.fetchone():
             return False  # near-duplicate repost, skip
 
         cur.execute(
-            """INSERT INTO jobs (job_id, title, company, url, jd_text, source_keyword)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
-            (job["job_id"], job["title"], job["company"], job["url"], job["jd_text"], job.get("source_keyword")),
+            """INSERT INTO jobs (job_id, title, company, url, jd_text, jd_hash, source_keyword)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (job["job_id"], job["title"], job["company"], job["url"], job["jd_text"], jd_hash, job.get("source_keyword")),
         )
         conn.commit()
         return True
@@ -95,6 +133,19 @@ def mark_applied(job_id: str, applied: bool = True):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("UPDATE matches SET applied = %s WHERE job_id = %s", (applied, job_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def save_benchmark_match(job_id, result, resume_version, classifier_model, scorer_model):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO match_benchmark (job_id, classifier_model, scorer_model, resume_version, score, missing_skills, reasoning)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+        (job_id, classifier_model, scorer_model, resume_version, result.get("score"), result.get("missing_skills"), result.get("reasoning")),
+    )
     conn.commit()
     cur.close()
     conn.close()

@@ -44,7 +44,7 @@ DRY_RUN = os.environ.get("MATCHER_DRY_RUN", "").lower() in ("1", "true", "yes")
 
 # Two models, two separate OpenRouter rate-limit pools — classification calls
 # don't eat into the scoring model's daily quota, and vice versa.
-CLASSIFIER_MODEL = "nvidia/nemotron-3.5-lightning:free"
+CLASSIFIER_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 SCORER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 RESUMES = {
@@ -89,17 +89,6 @@ Resume:
 Job Description:
 {jd_text}
 
-Scoring rules:
-- Identify the required years of professional experience stated in the JD, if any.
-- If the JD requires 5+ years of experience (or more) and the candidate's actual
-  professional experience falls meaningfully short of that requirement, treat this
-  as a significant gap: cap the score at 50 or below, even if the candidate's
-  technical skills otherwise align well with the role.
-- If the JD requires fewer than 5 years, or does not specify a minimum, do not
-  apply this cap — score based on overall fit as usual.
-- A hard, explicitly stated year requirement ("X+ years required") should be
-  weighted more heavily than a "nice to have" experience mention.
-
 Return ONLY a JSON object, no markdown fences, no extra commentary, in exactly this shape:
 {{"score": <integer 0-100>, "missing_skills": "<comma-separated list>", "reasoning": "<1-2 sentence explanation>"}}
 """
@@ -130,7 +119,53 @@ def extract_error(data):
     return None
 
 
+def dispatch_error(error, resp, model, attempt):
+    """Shared error-handling logic for both pre-stream (plain error status)
+    and mid-stream (SSE error event) cases — same dispatch either way, since
+    OpenRouter uses the same error_type vocabulary in both places.
+
+    Returns "retry" (caller should continue the retry loop) or "stop"
+    (caller should give up on this call and return None). Raises
+    FatalAPIError directly for run-ending problems.
+    """
+    error_type = error.get("metadata", {}).get("error_type")
+    code = error.get("code", resp.status_code)
+
+    if error_type == "rate_limit_exceeded" or code == 429:
+        retry_after = resp.headers.get("Retry-After")
+        wait = float(retry_after) if retry_after else 2 ** (attempt + 1)
+        print(f"  Rate limited on {model}; waiting {wait}s before retry.")
+        time.sleep(wait)
+        return "retry"
+
+    if error_type == "payment_required" or code == 402:
+        raise FatalAPIError(f"{model}: out of credits (402). Add credits and rerun.")
+
+    if error_type == "authentication" or code == 401:
+        raise FatalAPIError(f"{model}: invalid API key (401). Check OPENROUTER_API_KEY.")
+
+    if error_type in ("provider_overloaded", "provider_unavailable", "server", "timeout", "unmapped") or code in (502, 503, 504) or code >= 500:
+        retry_after = resp.headers.get("Retry-After")
+        wait = float(retry_after) if retry_after else 2 ** (attempt + 1)
+        print(f"  Transient error ({error_type or code}) from {model}; waiting {wait}s before retry.")
+        time.sleep(wait)
+        return "retry"
+
+    print(f"  Non-retryable error from {model}: {error.get('message')} (error_type={error_type})")
+    return "stop"
+
+
 def call_model(model, prompt, retries=2):
+    """Streams the response (stream: true) instead of waiting for one big
+    JSON blob — tokens arriving incrementally reset the read-timeout clock,
+    which avoids "Read timed out" failures on slower models (e.g. Nemotron
+    3 Ultra's measured ~3 tokens/sec, which can take 50-65s+ to fully
+    generate a response on its own — right up against a 60s timeout even
+    with zero queue delay). Errors can arrive two ways per OpenRouter's docs:
+    a plain error status before any tokens (pre-stream), or an SSE event
+    mid-stream after the 200 OK is already committed — both go through the
+    same dispatch_error() so behavior matches the old non-streaming path.
+    """
     for attempt in range(retries + 1):
         try:
             resp = requests.post(
@@ -139,61 +174,67 @@ def call_model(model, prompt, retries=2):
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
+                    "stream": True,
                 },
+                stream=True,
                 timeout=60,
             )
-            data = resp.json()
         except requests.exceptions.RequestException as e:
             print(f"  Attempt {attempt + 1} failed ({model}): network error: {e}")
             time.sleep(2 ** (attempt + 1))
             continue
-        except ValueError as e:
-            print(f"  Attempt {attempt + 1} failed ({model}): invalid JSON response: {e}")
-            time.sleep(2 ** (attempt + 1))
-            continue
 
-        error = extract_error(data)
-        if error is None and resp.status_code >= 400:
-            # No parseable error body, but still a failing status — fall back
-            # to the HTTP code alone.
-            error = {"code": resp.status_code, "message": resp.text[:200], "metadata": {}}
-
-        if error:
-            error_type = error.get("metadata", {}).get("error_type")
-            code = error.get("code", resp.status_code)
-
-            if error_type == "rate_limit_exceeded" or code == 429:
-                retry_after = resp.headers.get("Retry-After")
-                wait = float(retry_after) if retry_after else 2 ** (attempt + 1)
-                print(f"  Rate limited on {model}; waiting {wait}s before retry.")
-                time.sleep(wait)
+        # Pre-stream error: request rejected outright, before any tokens.
+        if resp.status_code >= 400:
+            try:
+                data = resp.json()
+                error = data.get("error") or {"code": resp.status_code, "message": resp.text[:200], "metadata": {}}
+            except ValueError:
+                error = {"code": resp.status_code, "message": resp.text[:200], "metadata": {}}
+            outcome = dispatch_error(error, resp, model, attempt)
+            if outcome == "retry":
                 continue
+            return None  # "stop"
 
-            if error_type == "payment_required" or code == 402:
-                raise FatalAPIError(f"{model}: out of credits (402). Add credits and rerun.")
-
-            if error_type == "authentication" or code == 401:
-                raise FatalAPIError(f"{model}: invalid API key (401). Check OPENROUTER_API_KEY.")
-
-            if error_type in ("provider_overloaded", "provider_unavailable", "server", "timeout", "unmapped") or code in (502, 503, 504) or code >= 500:
-                # Provider-side/transient — honor Retry-After (sent on 429/503) if present.
-                retry_after = resp.headers.get("Retry-After")
-                wait = float(retry_after) if retry_after else 2 ** (attempt + 1)
-                print(f"  Transient error ({error_type or code}) from {model}; waiting {wait}s before retry.")
-                time.sleep(wait)
-                continue
-
-            # Request-shape errors (bad prompt, content policy, context length, etc.)
-            # — retrying the identical request won't help, so don't burn retries on it.
-            print(f"  Non-retryable error from {model}: {error.get('message')} (error_type={error_type})")
-            return None
-
+        content_parts = []
+        mid_stream_error = None
+        stream_broke = False
         try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as e:
-            print(f"  Unexpected response shape from {model}: {e}")
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data: "):
+                    continue
+                payload = line[len("data: "):].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+
+                error = extract_error(chunk)
+                if error:
+                    mid_stream_error = error
+                    break
+
+                choices = chunk.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    content_parts.append(delta.get("content") or "")
+        except requests.exceptions.RequestException as e:
+            print(f"  Attempt {attempt + 1} failed ({model}) mid-stream: {e}")
+            stream_broke = True
+
+        if stream_broke:
             time.sleep(2 ** (attempt + 1))
             continue
+
+        if mid_stream_error:
+            outcome = dispatch_error(mid_stream_error, resp, model, attempt)
+            if outcome == "retry":
+                continue
+            return None  # "stop"
+
+        return "".join(content_parts)
 
     return None
 
