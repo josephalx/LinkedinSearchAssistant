@@ -55,28 +55,6 @@
     border-top: 1px solid var(--border);
   }
   section:first-of-type h2 { border-top: none; padding-top: 0; }
-  .dry-run-badge {
-    display: inline-block;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    color: var(--mid);
-    border: 1px solid var(--mid);
-    border-radius: 3px;
-    padding: 1px 6px;
-    margin-left: 8px;
-    vertical-align: middle;
-  }
-  .prod-badge {
-    display: inline-block;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    color: var(--bad);
-    border: 1px solid var(--bad);
-    border-radius: 3px;
-    padding: 1px 6px;
-    margin-left: 8px;
-    vertical-align: middle;
-  }
   .run-section {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     margin-bottom: 1.5rem;
@@ -143,7 +121,7 @@
   <h1>Run scraper / matcher</h1>
 
   <section>
-    <h2>Scraper <span class="dry-run-badge" id="scraper-mode-badge">checking mode...</span></h2>
+    <h2>Scraper</h2>
     <div class="run-section">
       <button class="run-btn" id="scraper-run">Run scraper</button>
       <button class="run-btn" id="scraper-stop" disabled>Stop</button>
@@ -154,7 +132,7 @@
   </section>
 
   <section>
-    <h2>Matcher <span class="dry-run-badge" id="matcher-mode-badge">checking mode...</span></h2>
+    <h2>Matcher</h2>
     <div class="run-section">
       <button class="run-btn" id="matcher-run">Run matcher</button>
       <button class="run-btn" id="matcher-stop" disabled>Stop</button>
@@ -340,20 +318,7 @@ async function checkRunStatus(name, runner) {
     const resp = await fetch(API_BASE + "/api/run-status");
     const data = await resp.json();
     if (data[name + "_running"]) runner.setRunning(true);
-
-    const badge = document.getElementById(name + "-mode-badge");
-    const isDryRun = data[name + "_dry_run"];
-    if (isDryRun) {
-      badge.textContent = "dry-run \u2014 not saved";
-      badge.className = "dry-run-badge";
-    } else {
-      badge.textContent = "prod \u2014 writes to DB";
-      badge.className = "prod-badge";
-    }
-  } catch (e) {
-    const badge = document.getElementById(name + "-mode-badge");
-    badge.textContent = "mode unknown (api unreachable)";
-  }
+  } catch (e) { /* ignore */ }
 }
 
 const scraperRunner = setupRunner("scraper", { newCountChipId: "scraper-new-chip" });
