@@ -19,13 +19,19 @@ __pycache__/
 .DS_Store
 
 # Generated output
-# matches_export.json is rebuilt by export_matches.py; last_job_debug.html is a
-# scraper page dump. Both hold scraped job data and shouldn't be committed.
-matches_export.json
+# matches_export.json is rebuilt by export_matches.py; last_job_debug.html and
+# debug_search_page.html/png are scraper page dumps. All hold scraped job data
+# and/or are regenerated automatically, so none should be committed.
+results/matches_export.json
 last_job_debug.html
+debug_search_page.html
+debug_search_page.png
 
 # Benchmark result dumps from comparison_benchmark.py
 benchmarks_results/
 
 # Logs
 *.log
+
+# Lock files from api.py's run/stop tracking — recreated automatically
+*.lock

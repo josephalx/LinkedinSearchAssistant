@@ -224,6 +224,11 @@ def stop_scraper():
     if proc is None or proc.poll() is not None:
         return jsonify({"error": "scraper not running"}), 409
 
+    stop_line = "\n=== Stopped by user ===\n"
+    with open(SCRAPER_LOG, "a") as log:
+        log.write(stop_line)
+    socketio.emit("scraper_log", {"line": stop_line})
+
     try:
         pgid = os.getpgid(proc.pid)
         os.killpg(pgid, signal.SIGTERM)  # asks Python + Chrome + chromedriver to exit
@@ -251,6 +256,17 @@ def run_status():
     })
 
 
+@app.route("/api/pending-count")
+def pending_count():
+    conn = db.get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM jobs WHERE job_id NOT IN (SELECT job_id FROM matches)")
+    count = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return jsonify({"pending": count})
+
+
 @app.route("/api/run-matcher", methods=["POST"])
 @require_token
 def run_matcher():
@@ -267,6 +283,11 @@ def stop_matcher():
     proc = active_matcher_proc["proc"]
     if proc is None or proc.poll() is not None:
         return jsonify({"error": "matcher not running"}), 409
+
+    stop_line = "\n=== Stopped by user ===\n"
+    with open(MATCHER_LOG, "a") as log:
+        log.write(stop_line)
+    socketio.emit("matcher_log", {"line": stop_line})
 
     try:
         pgid = os.getpgid(proc.pid)

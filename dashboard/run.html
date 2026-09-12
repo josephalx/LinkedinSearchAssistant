@@ -95,6 +95,16 @@
   .run-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .run-indicator { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); }
   .run-indicator.active { color: var(--mid); }
+  .chip {
+    display: inline-flex; align-items: center;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--good);
+    border: 1px solid var(--good);
+    border-radius: 12px;
+    padding: 2px 10px;
+  }
+  .chip.pending-chip { color: var(--accent); border-color: var(--accent); }
   .log-panel {
     display: none;
     font-family: 'IBM Plex Mono', monospace;
@@ -138,6 +148,7 @@
       <button class="run-btn" id="scraper-run">Run scraper</button>
       <button class="run-btn" id="scraper-stop" disabled>Stop</button>
       <span class="run-indicator" id="scraper-indicator"></span>
+      <span class="chip" id="scraper-new-chip">0 new</span>
     </div>
     <pre class="log-panel" id="scraper-log"></pre>
   </section>
@@ -148,6 +159,7 @@
       <button class="run-btn" id="matcher-run">Run matcher</button>
       <button class="run-btn" id="matcher-stop" disabled>Stop</button>
       <span class="run-indicator" id="matcher-indicator"></span>
+      <span class="chip pending-chip" id="matcher-pending-chip">... pending</span>
     </div>
     <pre class="log-panel" id="matcher-log"></pre>
   </section>
@@ -178,11 +190,28 @@ function classifyLine(line) {
 
 const socket = io(API_BASE);
 
-function setupRunner(name) {
+function setupRunner(name, opts) {
+  opts = opts || {};
   const runBtn = document.getElementById(name + "-run");
   const stopBtn = document.getElementById(name + "-stop");
   const indicator = document.getElementById(name + "-indicator");
   const logPanel = document.getElementById(name + "-log");
+  const newChip = opts.newCountChipId ? document.getElementById(opts.newCountChipId) : null;
+  const pendingChip = opts.pendingChipId ? document.getElementById(opts.pendingChipId) : null;
+  let newCount = 0;
+  let pendingCount = null;
+
+  async function refreshPendingCount() {
+    if (!pendingChip) return;
+    try {
+      const resp = await fetch(API_BASE + "/api/pending-count");
+      const data = await resp.json();
+      pendingCount = data.pending;
+      pendingChip.textContent = pendingCount + " pending";
+    } catch (e) {
+      pendingChip.textContent = "pending: unknown";
+    }
+  }
 
   function appendLine(line) {
     const cls = classifyLine(line);
@@ -193,6 +222,21 @@ function setupRunner(name) {
     logPanel.style.display = "block";
     appendLine(line);
     logPanel.scrollTop = logPanel.scrollHeight;
+
+    if (newChip && /^Parsed \(stored\):/.test(line)) {
+      newCount++;
+      newChip.textContent = newCount + " new";
+    }
+
+    // A job was handled (scored or clearance-excluded) this run — reflect
+    // that immediately in the pending count, even before the run finishes.
+    // In dry-run mode nothing is actually saved to the DB, so this is only
+    // a live "progress through this run" estimate — refreshPendingCount()
+    // re-syncs to the real DB value once the run completes either way.
+    if (pendingChip && pendingCount !== null && (/^\[\d+%\]/.test(line) || /^\[excluded\]/.test(line))) {
+      pendingCount = Math.max(0, pendingCount - 1);
+      pendingChip.textContent = pendingCount + " pending";
+    }
   }
 
   async function loadExistingLog() {
@@ -225,12 +269,17 @@ function setupRunner(name) {
     indicator.classList.remove("active");
     runBtn.disabled = false;
     stopBtn.disabled = true;
+    refreshPendingCount();
   });
 
   runBtn.addEventListener("click", async () => {
     const token = getToken();
     if (!token) return;
     logPanel.innerHTML = "";
+    if (newChip) {
+      newCount = 0;
+      newChip.textContent = "0 new";
+    }
     setRunning(true);
     indicator.textContent = "starting...";
     try {
@@ -283,7 +332,7 @@ function setupRunner(name) {
     }
   });
 
-  return { loadExistingLog, setRunning };
+  return { loadExistingLog, setRunning, refreshPendingCount };
 }
 
 async function checkRunStatus(name, runner) {
@@ -307,11 +356,12 @@ async function checkRunStatus(name, runner) {
   }
 }
 
-const scraperRunner = setupRunner("scraper");
-const matcherRunner = setupRunner("matcher");
+const scraperRunner = setupRunner("scraper", { newCountChipId: "scraper-new-chip" });
+const matcherRunner = setupRunner("matcher", { pendingChipId: "matcher-pending-chip" });
 
 scraperRunner.loadExistingLog();
 matcherRunner.loadExistingLog();
+matcherRunner.refreshPendingCount();
 checkRunStatus("scraper", scraperRunner);
 checkRunStatus("matcher", matcherRunner);
 </script>

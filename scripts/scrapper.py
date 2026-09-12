@@ -180,7 +180,7 @@ def extract_jd(driver, job_url):
     }
 
 
-def scrape_search_page(driver, max_jobs=40, source_keyword=None):
+def scrape_search_page(driver, max_jobs=40, source_keyword=None, new_counts=None):
     cards = get_job_cards(driver)
 
     # Collect URLs first (from the search page) before navigating away from it —
@@ -206,6 +206,8 @@ def scrape_search_page(driver, max_jobs=40, source_keyword=None):
                 else:
                     inserted = db.insert_job(jd)
                     status = "stored" if inserted else "already in DB"
+                    if inserted and new_counts is not None:
+                        new_counts[source_keyword] = new_counts.get(source_keyword, 0) + 1
                 results.append(jd)
                 print(f"Parsed ({status}): {jd['title']} @ {jd['company']}")
         except (NoSuchElementException, TimeoutException) as e:
@@ -217,7 +219,7 @@ def scrape_search_page(driver, max_jobs=40, source_keyword=None):
     return results
 
 
-def scrape_keyword(driver, keyword):
+def scrape_keyword(driver, keyword, new_counts=None):
     """Paginate through search results for a single keyword."""
     all_jobs = []
     page_size = 25
@@ -234,7 +236,7 @@ def scrape_keyword(driver, keyword):
             break
 
         try:
-            jobs = scrape_search_page(driver, max_jobs=page_size, source_keyword=keyword)
+            jobs = scrape_search_page(driver, max_jobs=page_size, source_keyword=keyword, new_counts=new_counts)
         except TimeoutException:
             print(f"[{keyword}] No results found at start={start}; stopping.")
             break
@@ -258,14 +260,22 @@ def main():
     driver = init_driver()
     try:
         all_jobs = []
+        new_counts = {}  # source_keyword -> count of genuinely new DB inserts
         for keyword in SEARCH_KEYWORDS:
             print(f"\n=== Searching: {keyword} ===")
-            all_jobs.extend(scrape_keyword(driver, keyword))
+            all_jobs.extend(scrape_keyword(driver, keyword, new_counts=new_counts))
             random_delay(8, 15)  # gap between keyword searches, not just pages
 
         print(f"\nTotal parsed across all keywords: {len(all_jobs)}")
         for j in all_jobs:
             print(j["job_id"], j["title"], j["company"], f"[{j.get('source_keyword')}]")
+
+        total_new = sum(new_counts.values())
+        print("\n=== New jobs added to DB, by category ===")
+        for keyword in SEARCH_KEYWORDS:
+            print(f"  {keyword}: {new_counts.get(keyword, 0)}")
+        print(f"  TOTAL NEW: {total_new}")
+
         return all_jobs
     finally:
         driver.quit()
