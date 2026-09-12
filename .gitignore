@@ -25,7 +25,7 @@ matches_export.json
 last_job_debug.html
 
 # Benchmark result dumps from comparison_benchmark.py
-benchmarks/
+benchmarks_results/
 
 # Logs
 *.log

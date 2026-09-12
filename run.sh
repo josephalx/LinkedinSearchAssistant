@@ -30,10 +30,10 @@ if [[ "$MODE" != "dry" && "$MODE" != "prod" ]]; then
 fi
 
 if [[ "$TARGET" == "scraper" ]]; then
-  SCRIPT="$SCRIPT_DIR/scrapper.py"
+  SCRIPT="$SCRIPT_DIR/scripts/scrapper.py"
   ENV_VAR="SCRAPER_DRY_RUN"
 else
-  SCRIPT="$SCRIPT_DIR/matcher.py"
+  SCRIPT="$SCRIPT_DIR/scripts/matcher.py"
   ENV_VAR="MATCHER_DRY_RUN"
 fi
 

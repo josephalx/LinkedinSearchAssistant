@@ -12,18 +12,23 @@ Reuses matcher.py's prompts, call_model(), and error handling directly —
 only the model slugs differ.
 
 Usage:
-    python3 comparison_benchmark.py [path/to/matches_export.json]
-    (defaults to matches_export.json in this folder)
+    python3 scripts/comparison_benchmark.py [path/to/matches_export.json]
+    (defaults to results/matches_export.json)
 
 Output:
-    benchmark_comparison_ultra_guardrails.json — old score/reasoning next to new, per job.
+    benchmarks_results/benchmark_comparison_<model>.json — old score/reasoning
+    next to new, per job.
 """
 
+import os
 import sys
 import json
 import time
 import random
 
+# db.py lives in data/, a sibling of scripts/
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
 import db
 import matcher  # reuse build_classifier_prompt, build_prompt, call_model,
                  # parse_json_response, requires_clearance, get_job_details,
@@ -34,8 +39,11 @@ import matcher  # reuse build_classifier_prompt, build_prompt, call_model,
 BENCHMARK_CLASSIFIER_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 BENCHMARK_SCORER_MODEL = "inclusionai/ling-3.0-flash-vl:free"
 
-DEFAULT_INPUT = "matches_export.json"
-OUTPUT_PATH = "benchmark_comparison_ling-vl.json"
+# Reads the export from results/; the comparison dump lands in benchmarks_results/.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_INPUT = os.path.join(PROJECT_ROOT, "results", "matches_export.json")
+BENCHMARKS_DIR = os.path.join(PROJECT_ROOT, "benchmarks_results")
+OUTPUT_PATH = os.path.join(BENCHMARKS_DIR, "benchmark_comparison_ling-vl.json")
 
 
 def classify_resume_type(jd_text):
@@ -123,6 +131,7 @@ def main():
     except matcher.FatalAPIError as e:
         print(f"\nStopping early — {e}")
 
+    os.makedirs(BENCHMARKS_DIR, exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump(comparison, f, indent=2, ensure_ascii=False)
 

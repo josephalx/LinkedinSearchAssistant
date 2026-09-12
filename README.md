@@ -7,7 +7,7 @@ scraping/scoring and watch live logs, from your browser or phone.
 ## How it fits together
 
 ```
-scrapper.py  -->  Postgres (jobs table)  -->  matcher.py  -->  Postgres (matches table)
+scripts/scrapper.py  -->  Postgres (jobs table)  -->  scripts/matcher.py  -->  Postgres (matches)
                                                                       |
                                                                       v
                                               dashboard/api.py  -->  dashboard/dashboard.html
@@ -15,15 +15,18 @@ scrapper.py  -->  Postgres (jobs table)  -->  matcher.py  -->  Postgres (matches
                                               dashboard/run.html (trigger + live logs)
 ```
 
-- **`scrapper.py`** — Selenium scrapes LinkedIn's public (logged-out) job search, stores parsed postings in the `jobs` table.
-- **`matcher.py`** — classifies each job (mobile vs. software engineering) and scores it against the matching resume via OpenRouter, storing results in `matches`.
-- **`db.py`** — all Postgres connection/schema logic. **This is where DB credentials live.**
+- **`scripts/scrapper.py`** — Selenium scrapes LinkedIn's public (logged-out) job search, stores parsed postings in the `jobs` table.
+- **`scripts/matcher.py`** — classifies each job (mobile vs. software engineering) and scores it against the matching resume via OpenRouter, storing results in `matches`.
+- **`data/db.py`** — all Postgres connection/schema logic. **This is where DB credentials live.**
 - **`dashboard/api.py`** — a local Flask API: serves match data to the dashboard, and can trigger/stop the scraper and matcher with live log streaming over WebSocket.
 - **`dashboard/dashboard.html`** — browse, filter, sort matches; mark jobs as applied.
 - **`dashboard/run.html`** — buttons to run/stop the scraper and matcher, with a live scrolling log panel.
 - **`run.sh` / `run.bat`** — run the scraper or matcher directly from the terminal, in dry-run or prod mode.
+- **`scripts/`** — the runnable Python entry points; `run.sh`, `start_api.sh`, and `dashboard/api.py` all point at it.
+- **`data/`** — the database layer (`db.py`); every script puts it on `sys.path` before importing it.
 - **`start_api.sh` / `start_api.bat`** — start the API server, in dry-run or prod mode.
-- **`export_matches.py`** — dumps `matches` + `jobs` to a JSON file (a fallback if you ever want a static export instead of the live dashboard).
+- **`scripts/export_matches.py`** — dumps `matches` + `jobs` to `results/matches_export.json` (a fallback if you ever want a static export instead of the live dashboard).
+- **`results/`** — exported match data. **`benchmarks_results/`** — `comparison_benchmark.py`'s side-by-side model dumps.
 
 ## 1. Prerequisites
 
@@ -47,7 +50,7 @@ Create the database once:
 createdb linkedinbot
 ```
 
-**Credentials live in `db.py`**, at the top:
+**Credentials live in `data/db.py`**, at the top:
 
 ```python
 DB_CONFIG = {
@@ -86,7 +89,7 @@ On a new machine, these need to be run again — keyring stores are machine-loca
 
 ## 5. Resume paths
 
-`matcher.py` has a `RESUMES` dict pointing at your two resume `.docx` files:
+`scripts/matcher.py` has a `RESUMES` dict pointing at your two resume `.docx` files:
 
 ```python
 RESUMES = {
@@ -128,7 +131,7 @@ Change `josephs-macbook-pro.local` to your own machine's `.local` hostname (or i
 
 ## 7. Search settings
 
-`scrapper.py` config near the top:
+`scripts/scrapper.py` config near the top:
 ```python
 SEARCH_KEYWORDS = ["android engineer", "react native developer", "software engineer"]
 SEARCH_LOCATION = "United States"
@@ -138,6 +141,6 @@ Edit these to change what gets searched for.
 
 ## Notes
 
-- **Dry-run vs. prod** is controlled per-script via `SCRAPER_DRY_RUN` / `MATCHER_DRY_RUN` environment variables — see `run.sh`/`start_api.sh` for how these get set. A plain `python3 scrapper.py` or `python3 matcher.py` with no env vars set runs in full "prod" mode (real DB writes).
+- **Dry-run vs. prod** is controlled per-script via `SCRAPER_DRY_RUN` / `MATCHER_DRY_RUN` environment variables — see `run.sh`/`start_api.sh` for how these get set. A plain `python3 scripts/scrapper.py` or `python3 scripts/matcher.py` with no env vars set runs in full "prod" mode (real DB writes).
 - The dashboard API listens on `0.0.0.0:5050`, reachable from other devices on your local network (e.g. your phone) — it is **not** exposed to the internet, and trigger endpoints require the dashboard token.
 - `debug_search_page.html`, `last_job_debug.html`, `scraper_run.log`, `matcher_run.log`, and `*.lock` files are all working artifacts generated automatically — safe to delete anytime; they'll be recreated as needed.

@@ -2,14 +2,22 @@
 Exports `jobs` joined with `matches` into a single JSON file, so you can
 upload it here (or anywhere) to review match score accuracy.
 
-Run: python3 export_matches.py
-Output: matches_export.json in the same folder.
+Run: python3 scripts/export_matches.py
+Output: results/matches_export.json.
 """
 
+import os
+import sys
 import json
 from datetime import datetime
 
+# db.py lives in data/, a sibling of scripts/; exports land in results/.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
 import db
+
+RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+OUTPUT_PATH = os.path.join(RESULTS_DIR, "matches_export.json")
 
 
 def export():
@@ -45,10 +53,11 @@ def export():
             record["scored_at"] = record["scored_at"].isoformat()
         results.append(record)
 
-    with open("matches_export.json", "w", encoding="utf-8") as f:
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
-    print(f"Exported {len(results)} matches to matches_export.json")
+    print(f"Exported {len(results)} matches to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

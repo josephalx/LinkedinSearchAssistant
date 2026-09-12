@@ -23,10 +23,10 @@ if /I not "%TARGET%"=="scraper" if /I not "%TARGET%"=="matcher" goto usage
 if /I not "%MODE%"=="dry" if /I not "%MODE%"=="prod" goto usage
 
 if /I "%TARGET%"=="scraper" (
-    set "SCRIPT=%SCRIPT_DIR%scrapper.py"
+    set "SCRIPT=%SCRIPT_DIR%scripts\scrapper.py"
     set "ENV_VAR=SCRAPER_DRY_RUN"
 ) else (
-    set "SCRIPT=%SCRIPT_DIR%matcher.py"
+    set "SCRIPT=%SCRIPT_DIR%scripts\matcher.py"
     set "ENV_VAR=MATCHER_DRY_RUN"
 )
 

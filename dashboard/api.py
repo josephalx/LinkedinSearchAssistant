@@ -23,9 +23,10 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_socketio import SocketIO
 
-# db.py lives in the project root, one level up from dashboard/
+# The scraper/matcher live in scripts/, db.py in data/ — both siblings of dashboard/
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, PROJECT_ROOT)
+SCRIPTS_DIR = os.path.join(PROJECT_ROOT, "scripts")
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
 import db
 
 app = Flask(__name__)
@@ -108,7 +109,7 @@ def run_scraper_background():
 
     with open(SCRAPER_LOG, "w") as log:
         proc = subprocess.Popen(
-            [sys.executable, "-u", os.path.join(PROJECT_ROOT, "scrapper.py")],
+            [sys.executable, "-u", os.path.join(SCRIPTS_DIR, "scrapper.py")],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -145,7 +146,7 @@ def run_matcher_background():
 
     with open(MATCHER_LOG, "w") as log:
         proc = subprocess.Popen(
-            [sys.executable, "-u", os.path.join(PROJECT_ROOT, "matcher.py")],
+            [sys.executable, "-u", os.path.join(SCRIPTS_DIR, "matcher.py")],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

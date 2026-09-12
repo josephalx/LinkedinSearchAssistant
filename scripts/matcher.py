@@ -21,6 +21,7 @@ Queue logic:
 
 import os
 import re
+import sys
 import json
 import time
 import random
@@ -30,6 +31,9 @@ import keyring
 import requests
 from docx import Document
 
+# db.py lives in data/, a sibling of scripts/
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
 import db
 
 

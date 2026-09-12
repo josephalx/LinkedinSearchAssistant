@@ -7,10 +7,15 @@ Storage (jobs table) and scoring (matcher) are separate scripts, added next.
 
 import os
 import re
+import sys
 import time
 import random
 import keyring
 
+# Debug dumps land in the project root, one level up from scripts/;
+# db.py lives in data/, a sibling of scripts/.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
 import db
 
 from urllib.parse import quote
@@ -111,9 +116,9 @@ def get_job_cards(driver):
         )
     except TimeoutException:
         # Save what we actually got so selectors can be corrected instead of guessed again.
-        with open("debug_search_page.html", "w", encoding="utf-8") as f:
+        with open(os.path.join(PROJECT_ROOT, "debug_search_page.html"), "w", encoding="utf-8") as f:
             f.write(driver.page_source)
-        driver.save_screenshot("debug_search_page.png")
+        driver.save_screenshot(os.path.join(PROJECT_ROOT, "debug_search_page.png"))
         raise
     return driver.find_elements(By.CSS_SELECTOR, "div.base-card")
 
@@ -147,7 +152,7 @@ def extract_jd(driver, job_url):
     # with sign-in modal overlays that sometimes cover the page.
 
     # Dump the raw page so we can inspect real class names instead of guessing.
-    with open("last_job_debug.html", "w", encoding="utf-8") as f:
+    with open(os.path.join(PROJECT_ROOT, "last_job_debug.html"), "w", encoding="utf-8") as f:
         f.write(driver.page_source)
 
     def safe_text(selector):
