@@ -41,6 +41,7 @@ def init_db():
     # In case jobs already exists from before source_keyword/jd_hash were added.
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_keyword TEXT")
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jd_hash TEXT")
+    cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_checked BOOLEAN DEFAULT FALSE")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_jd_hash ON jobs (jd_hash)")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS matches (
@@ -86,30 +87,25 @@ def _jd_hash(jd_text: str) -> str:
 
 
 def insert_job(job: dict) -> bool:
-    """Insert a scraped job. Returns False if job_id already existed, OR if a
-    job with the same normalized (title, company) is already stored, OR if
-    the JD text content itself is an exact duplicate (by hash) — LinkedIn
-    commonly reposts the identical listing under a fresh job_id, sometimes
-    with trivial title formatting differences that a plain string match
-    would miss."""
+    """Insert a scraped job. Returns False if job_id already existed, OR if
+    the JD text content itself is an exact duplicate (by hash) — the only
+    reliable signal that two postings are genuinely the same. Title+company
+    matching alone is NOT used to skip: companies (especially staffing
+    agencies — Motion Recruitment, Apex Systems, Mastech Digital, etc. —
+    routinely post many genuinely different roles under one generic title),
+    so treating that alone as duplication would silently drop real postings.
+    """
     conn = get_connection()
     cur = conn.cursor()
     try:
         jd_hash = _jd_hash(job["jd_text"])
 
         cur.execute(
-            """SELECT 1 FROM jobs
-               WHERE (LOWER(TRIM(title)) = %s AND LOWER(TRIM(company)) = %s)
-                  OR jd_hash = %s
-               LIMIT 1""",
-            (
-                _normalize_for_dedup(job["title"]),
-                _normalize_for_dedup(job["company"]),
-                jd_hash,
-            ),
+            "SELECT 1 FROM jobs WHERE jd_hash = %s LIMIT 1",
+            (jd_hash,),
         )
         if cur.fetchone():
-            return False  # near-duplicate repost, skip
+            return False  # exact content duplicate, skip
 
         cur.execute(
             """INSERT INTO jobs (job_id, title, company, url, jd_text, jd_hash, source_keyword)
@@ -165,6 +161,90 @@ def unscored_job_ids() -> list[str]:
     cur.close()
     conn.close()
     return [r[0] for r in rows]
+
+
+def unchecked_unscored_jobs():
+    """Jobs that are (a) unscored and (b) haven't been through the dedup
+    cleanup agent yet. This is the durable "flag" the cleanup step uses —
+    once a job is marked checked, it's never re-examined, so a restart of
+    the scraper (or the cleanup step itself) just re-queries this and finds
+    nothing new to do if the prior run already finished.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT job_id, title, company, jd_text, jd_hash FROM jobs
+        WHERE dedup_checked = FALSE
+          AND job_id NOT IN (SELECT job_id FROM matches)
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows  # list of (job_id, title, company, jd_text, jd_hash)
+
+
+def find_dedup_candidate(job_id, title, company, jd_hash):
+    """Find another job sharing normalized (title, company) but a DIFFERENT
+    jd_hash — i.e. looks like the same posting on the surface, but isn't an
+    exact-content duplicate (those are already caught at insert time). This
+    is the ambiguous case the cleanup agent actually has to judge.
+    Returns (job_id, jd_text, is_scored) for the first candidate found, or
+    None.
+
+    Normalization here must match _normalize_for_dedup() exactly (lowercase
+    + collapse ALL internal whitespace runs to a single space) — plain
+    LOWER(TRIM(...)) only strips the edges, so scraped titles with any
+    inconsistent internal spacing would silently fail to match even when
+    Python's normalized comparison would consider them identical.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT j.job_id, j.jd_text,
+               EXISTS(SELECT 1 FROM matches m WHERE m.job_id = j.job_id) AS is_scored
+        FROM jobs j
+        WHERE regexp_replace(LOWER(TRIM(j.title)), '\s+', ' ', 'g') = %s
+          AND regexp_replace(LOWER(TRIM(j.company)), '\s+', ' ', 'g') = %s
+          AND j.jd_hash != %s
+          AND j.job_id != %s
+        LIMIT 1
+    """, (_normalize_for_dedup(title), _normalize_for_dedup(company), jd_hash, job_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row  # (job_id, jd_text, is_scored) or None
+
+
+def mark_dedup_checked(job_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE jobs SET dedup_checked = TRUE WHERE job_id = %s", (job_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def remove_job_if_unscored(job_id) -> bool:
+    """Deletes a job row, but only if it has no matches/match_benchmark rows
+    attached — never removes anything already scored, regardless of what
+    the cleanup agent concluded."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM matches WHERE job_id = %s LIMIT 1", (job_id,))
+    if cur.fetchone():
+        cur.close()
+        conn.close()
+        return False
+    cur.execute("SELECT 1 FROM match_benchmark WHERE job_id = %s LIMIT 1", (job_id,))
+    if cur.fetchone():
+        cur.close()
+        conn.close()
+        return False
+    cur.execute("DELETE FROM jobs WHERE job_id = %s", (job_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
 
 
 def pending_pairs(resume_versions: list[str]) -> list[tuple[str, str]]:

@@ -17,6 +17,9 @@ import keyring
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
 import db
+import dedupe_agent  # runs automatically at the end of main(); dedupe_agent.py
+                      # lives alongside this script in scripts/, so no extra
+                      # sys.path handling is needed for it specifically.
 
 from urllib.parse import quote
 
@@ -279,6 +282,11 @@ def main():
         return all_jobs
     finally:
         driver.quit()
+        # Runs after the browser closes (pure DB + API calls from here) —
+        # always, every scraper run, whether triggered from the terminal or
+        # the dashboard. Uses the same SCRAPER_DRY_RUN flag as the rest of
+        # this script, so a dashboard dry-run never deletes anything either.
+        dedupe_agent.run_cleanup()
 
 
 if __name__ == "__main__":
