@@ -8,14 +8,15 @@ scraping/scoring and watch live logs, from your browser or phone.
 
 ```
 scripts/scrapper.py  -->  Postgres (jobs table)  -->  scripts/matcher.py  -->  Postgres (matches)
-                                                                      |
-                                                                      v
-                                              dashboard/api.py  -->  dashboard/dashboard.html
-                                                    |
+        |                                                             |
+        v  (at end of every scrape)                                   v
+scripts/dedupe_agent.py --> prunes duplicate  dashboard/api.py  -->  dashboard/dashboard.html
+                            jobs before scoring      |
                                               dashboard/run.html (trigger + live logs)
 ```
 
 - **`scripts/scrapper.py`** — Selenium scrapes LinkedIn's public (logged-out) job search, stores parsed postings in the `jobs` table.
+- **`scripts/dedupe_agent.py`** — runs automatically at the end of every `scrapper.py` run: finds jobs sharing a normalized (title, company) but with different JD text, and asks an LLM whether they're the same posting. Duplicates are removed before scoring; distinct ones are flagged so they're never re-examined.
 - **`scripts/matcher.py`** — classifies each job (mobile vs. software engineering) and scores it against the matching resume via OpenRouter, storing results in `matches`.
 - **`data/db.py`** — all Postgres connection/schema logic. **This is where DB credentials live.**
 - **`dashboard/api.py`** — a local Flask API: serves match data to the dashboard, and can trigger/stop the scraper and matcher with live log streaming over WebSocket.
@@ -63,7 +64,7 @@ DB_CONFIG = {
 }
 ```
 
-Change `host`/`port`/`dbname`, and add `user`/`password` keys if you're pointing at a remote database. No other file needs to know about this — `scrapper.py`, `matcher.py`, and `api.py` all import `db.py` for every database operation.
+Change `host`/`port`/`dbname`, and add `user`/`password` keys if you're pointing at a remote database. No other file needs to know about this — `scrapper.py`, `matcher.py`, `dedupe_agent.py`, and `api.py` all import `db.py` for every database operation.
 
 Tables are created automatically — `scrapper.py`, `matcher.py`, and `api.py` each call `db.init_db()` on startup, which is safe to run repeatedly (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
 
@@ -78,7 +79,8 @@ Credentials are stored in your OS's secure credential store (macOS Keychain / Wi
 python3 -c "import keyring; keyring.set_password('linkedin', 'email', 'your_email@example.com')"
 python3 -c "import keyring; keyring.set_password('linkedin', 'password', 'your_password')"
 
-# OpenRouter API key (required — used by matcher.py for scoring)
+# OpenRouter API key (required — used by matcher.py for scoring, and by
+# dedupe_agent.py for duplicate judgments)
 python3 -c "import keyring; keyring.set_password('openrouter', 'api_key', 'your_openrouter_key')"
 
 # Dashboard token (required for the dashboard's run/stop trigger endpoints)
@@ -141,6 +143,8 @@ Edit these to change what gets searched for.
 
 ## Notes
 
-- **Dry-run vs. prod** is controlled per-script via `SCRAPER_DRY_RUN` / `MATCHER_DRY_RUN` environment variables — see `run.sh`/`start_api.sh` for how these get set. A plain `python3 scripts/scrapper.py` or `python3 scripts/matcher.py` with no env vars set runs in full "prod" mode (real DB writes).
+- **Dry-run vs. prod** is controlled per-script via `SCRAPER_DRY_RUN` / `MATCHER_DRY_RUN` environment variables — see `run.sh`/`start_api.sh` for how these get set. A plain `python3 scripts/scrapper.py` or `python3 scripts/matcher.py` with no env vars set runs in full "prod" mode (real DB writes). `dedupe_agent.py` reads the same `SCRAPER_DRY_RUN` flag, so a dry-run scrape reports what it *would* remove without deleting anything.
+- **Duplicate jobs are handled in two layers.** `db.insert_job()` drops exact content duplicates by JD hash at insert time (no API call). `dedupe_agent.py` then handles the ambiguous case — same normalized title + company, *different* JD text — with a single LLM judgment per candidate. It only ever touches unscored jobs, so anything already in `matches` is never deleted, and it defaults to "keep both" on any API failure. Staffing agencies that reuse one generic title across many real openings are explicitly accounted for in the prompt.
+- **`jobs.dedup_checked`** makes that step cheap to repeat — once a job is judged (kept or removed) it's never re-examined, so re-running an interrupted scrape is a fast no-op rather than a fresh round of API calls.
 - The dashboard API listens on `0.0.0.0:5050`, reachable from other devices on your local network (e.g. your phone) — it is **not** exposed to the internet, and trigger endpoints require the dashboard token.
 - `debug_search_page.html`, `last_job_debug.html`, `scraper_run.log`, `matcher_run.log`, and `*.lock` files are all working artifacts generated automatically — safe to delete anytime; they'll be recreated as needed.
