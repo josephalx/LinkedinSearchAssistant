@@ -1,6 +1,7 @@
 """
-Exports `jobs` joined with `matches` into a single JSON file, so you can
-upload it here (or anywhere) to review match score accuracy.
+Exports the TOP 10 highest-scoring, not-yet-applied `jobs`+`matches` into a
+single JSON file, so you can upload it here (or anywhere) to review match
+score accuracy or decide what to apply to next.
 
 Run: python3 scripts/export_matches.py
 Output: results/matches_export.json.
@@ -19,6 +20,8 @@ import db
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
 OUTPUT_PATH = os.path.join(RESULTS_DIR, "matches_export.json")
 
+TOP_N = 10
+
 
 def export():
     conn = db.get_connection()
@@ -35,11 +38,14 @@ def export():
             m.score,
             m.missing_skills,
             m.reasoning,
+            m.applied,
             m.scored_at
         FROM matches m
         JOIN jobs j ON j.job_id = m.job_id
-        ORDER BY m.scored_at DESC
-    """)
+        WHERE m.applied = FALSE
+        ORDER BY m.score DESC, m.scored_at DESC
+        LIMIT %s
+    """, (TOP_N,))
     rows = cur.fetchall()
     columns = [desc[0] for desc in cur.description]
     cur.close()
@@ -57,7 +63,7 @@ def export():
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
-    print(f"Exported {len(results)} matches to {OUTPUT_PATH}")
+    print(f"Exported top {len(results)} not-yet-applied matches to {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
