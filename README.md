@@ -7,16 +7,22 @@ scraping/scoring and watch live logs, from your browser or phone.
 ## How it fits together
 
 ```
-scripts/scrapper.py  -->  Postgres (jobs table)  -->  scripts/matcher.py  -->  Postgres (matches)
-        |                                                             |
-        v  (at end of every scrape)                                   v
-scripts/dedupe_agent.py --> prunes duplicate  dashboard/api.py  -->  dashboard/dashboard.html
-                            jobs before scoring      |
-                                              dashboard/run.html (trigger + live logs)
+scripts/scrapper.py  -->  Postgres (jobs table)
+                                 |
+                                 v   (automatically, at the end of every scrape)
+                       scripts/dedupe_agent.py  -- prunes duplicate jobs
+                                 |
+                                 v
+                       scripts/matcher.py  -->  Postgres (matches table)
+                                                         |
+                                                         v
+                                 dashboard/api.py  -->  dashboard/dashboard.html
+                                       |
+                                 dashboard/run.html (trigger + live logs)
 ```
 
 - **`scripts/scrapper.py`** — Selenium scrapes LinkedIn's public (logged-out) job search, stores parsed postings in the `jobs` table.
-- **`scripts/dedupe_agent.py`** — runs automatically at the end of every `scrapper.py` run: finds jobs sharing a normalized (title, company) but with different JD text, and asks an LLM whether they're the same posting. Duplicates are removed before scoring; distinct ones are flagged so they're never re-examined.
+- **`scripts/dedupe_agent.py`** — runs automatically at the end of every `scrapper.py` run: finds jobs sharing a normalized (title, company) but with different JD text, and asks an LLM whether they're the same posting. Duplicates are removed before scoring; distinct ones are flagged so they're never re-examined. Can also be run on its own: `python3 scripts/dedupe_agent.py`.
 - **`scripts/matcher.py`** — classifies each job (mobile vs. software engineering) and scores it against the matching resume via OpenRouter, storing results in `matches`.
 - **`data/db.py`** — all Postgres connection/schema logic. **This is where DB credentials live.**
 - **`dashboard/api.py`** — a local Flask API: serves match data to the dashboard, and can trigger/stop the scraper and matcher with live log streaming over WebSocket.
