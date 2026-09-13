@@ -226,7 +226,7 @@ def scrape_keyword(driver, keyword, new_counts=None):
     """Paginate through search results for a single keyword."""
     all_jobs = []
     page_size = 25
-    max_pages = 20  # cap pages tried; logged-out search often walls off before this
+    max_pages = 40  # cap pages tried; logged-out search often walls off before this
     start = 0
 
     while start < page_size * max_pages:

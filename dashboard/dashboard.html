@@ -151,6 +151,20 @@
     margin-top: 10px;
   }
   .applied-btn:hover { border-color: var(--accent); }
+  .notion-btn {
+    font-family: inherit; font-size: 13px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    margin-top: 10px;
+    margin-left: 8px;
+  }
+  .notion-btn:hover { border-color: var(--accent); }
+  .notion-btn.added { border-color: var(--good); color: var(--good); }
+  .notion-btn.failed { border-color: var(--bad); color: var(--bad); }
   .copy-btn {
     font-family: inherit; font-size: 13px;
     padding: 6px 12px;
@@ -331,7 +345,10 @@ function render() {
         '<div style="margin-top:6px;">' + d.reasoning + '</div>' +
         '<div style="margin-top:6px;"><a href="' + d.url + '" target="_blank">view posting \u2192</a></div>' +
         '<button class="applied-btn" data-job-id="' + d.job_id + '" data-applied="' + (!d.applied) + '">' +
-        (d.applied ? "mark not applied" : "mark applied") + '</button>' +
+        (d.applied ? "Mark not applied" : "Mark applied") + '</button>' +
+        '<button class="notion-btn" data-job-id="' + d.job_id + '">' +
+        '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" style="vertical-align:-2px; margin-right:5px;"><rect x="1" y="1" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 11.5V4.5L11.5 11.5V4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+        'Add to Notion</button>' +
         '</td></tr>';
     }
     return rows;
@@ -351,6 +368,26 @@ function render() {
       const jobId = btn.getAttribute("data-job-id");
       const applied = btn.getAttribute("data-applied") === "true";
       toggleApplied(jobId, applied);
+    });
+  });
+
+  document.querySelectorAll(".notion-btn").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const jobId = btn.getAttribute("data-job-id");
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Adding...";
+      try {
+        const resp = await fetch(API_URL + "/" + jobId + "/add-to-notion", { method: "POST" });
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        btn.textContent = "Added!";
+        btn.classList.add("added");
+      } catch (err) {
+        btn.textContent = "Failed — retry";
+        btn.classList.add("failed");
+        btn.disabled = false;
+      }
     });
   });
 

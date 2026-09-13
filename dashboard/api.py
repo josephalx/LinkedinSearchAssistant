@@ -28,6 +28,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(PROJECT_ROOT, "scripts")
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
 import db
+import notion
 
 app = Flask(__name__)
 CORS(app)
@@ -205,6 +206,27 @@ def set_applied(job_id):
 def unset_applied(job_id):
     db.mark_applied(job_id, applied=False)
     return jsonify({"job_id": job_id, "applied": False})
+
+
+@app.route("/api/matches/<job_id>/add-to-notion", methods=["POST"])
+def add_to_notion(job_id):
+    conn = db.get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT title, company, url FROM jobs WHERE job_id = %s", (job_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if row is None:
+        return jsonify({"error": "job not found"}), 404
+
+    title, company, url = row
+    try:
+        result = notion.add_job_to_notion(company=company, role=title, url=url)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    return jsonify({"job_id": job_id, "notion_page_id": result.get("id")})
 
 
 @app.route("/api/run-scraper", methods=["POST"])
