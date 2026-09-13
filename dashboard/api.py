@@ -176,7 +176,7 @@ def get_matches():
     cur = conn.cursor()
     cur.execute("""
         SELECT j.job_id, j.title, j.company, j.url, m.resume_version, m.score,
-               m.missing_skills, m.reasoning, m.applied, m.scored_at
+               m.missing_skills, m.reasoning, m.applied, m.added_to_notion, m.scored_at
         FROM matches m
         JOIN jobs j ON j.job_id = m.job_id
         ORDER BY m.scored_at DESC
@@ -212,7 +212,11 @@ def unset_applied(job_id):
 def add_to_notion(job_id):
     conn = db.get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT title, company, url FROM jobs WHERE job_id = %s", (job_id,))
+    cur.execute("""
+        SELECT j.title, j.company, j.url, m.added_to_notion
+        FROM jobs j JOIN matches m ON m.job_id = j.job_id
+        WHERE j.job_id = %s
+    """, (job_id,))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -220,12 +224,16 @@ def add_to_notion(job_id):
     if row is None:
         return jsonify({"error": "job not found"}), 404
 
-    title, company, url = row
+    title, company, url, added_to_notion = row
+    if added_to_notion:
+        return jsonify({"error": "already added to Notion"}), 409
+
     try:
         result = notion.add_job_to_notion(company=company, role=title, url=url)
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
+    db.mark_added_to_notion(job_id)
     return jsonify({"job_id": job_id, "notion_page_id": result.get("id")})
 
 

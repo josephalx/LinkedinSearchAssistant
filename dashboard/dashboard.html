@@ -39,6 +39,26 @@
     text-decoration: none;
   }
   .nav a:hover { text-decoration: underline; }
+  /* Outlined rather than filled: this is secondary to the Refresh pill, so it
+     reads as a control without competing with it for attention. */
+  .nav a.run-link {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: inherit;
+    font-size: 14px; font-weight: 500;
+    padding: 8px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    text-decoration: none;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .nav a.run-link:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+    text-decoration: none;
+  }
   .prompt {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 14px;
@@ -47,10 +67,19 @@
   }
   .prompt .cursor { color: var(--accent); }
   h1 {
-    font-size: 24px;
-    font-weight: 500;
-    margin: 0 0 1.5rem;
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0;
   }
+  /* Title block on the left, primary action on the right, sharing a baseline —
+     tighter than stacking the button under the heading. */
+  .page-head {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+    margin-bottom: 1.25rem;
+  }
+  .page-head .nav { margin: 0; }
   #status {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 13px;
@@ -63,6 +92,10 @@
     gap: 1px;
     background: var(--border);
     border: 1px solid var(--border);
+    border-radius: 12px;
+    /* The cards' own backgrounds would square off the corners otherwise — the
+       grid gap is what draws the divider lines here, not per-card borders. */
+    overflow: hidden;
     margin-bottom: 1.5rem;
   }
   .stat-card { background: var(--surface); padding: 1.1rem 1.25rem; }
@@ -72,31 +105,37 @@
     display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
     margin-bottom: 1rem;
   }
+  /* Fully rounded, Google-style — generous side padding so the text clears the
+     round ends. */
   input[type=text], select {
     background: var(--surface);
     border: 1px solid var(--border-strong);
     color: var(--text);
     font-family: inherit;
     font-size: 15px;
-    padding: 10px 12px;
-    border-radius: 4px;
+    padding: 10px 18px;
+    border-radius: 999px;
   }
   input[type=text]:focus-visible, select:focus-visible, button:focus-visible, input[type=range]:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
   input[type=text] { flex: 1; min-width: 160px; }
-  select { width: 190px; }
+  /* Extra room on the right: the native arrow sits inside the padding box, and
+     the pill's curve eats into the corner, so it needs a wider inset than a
+     square control would to keep clear of the border. */
+  select { width: 190px; padding-right: 22px; }
   .refresh-btn {
-    font-family: inherit; font-size: 15px;
-    padding: 10px 16px;
-    border: 1px solid var(--border-strong);
-    border-radius: 4px;
-    background: var(--surface);
-    color: var(--text);
+    font-family: inherit; font-size: 15px; font-weight: 500;
+    padding: 10px 18px;
+    border: none;
+    border-radius: 20px;
+    background: var(--accent);
+    color: var(--bg);
     cursor: pointer;
+    transition: opacity 0.15s ease;
   }
-  .refresh-btn:hover { border-color: var(--accent); }
+  .refresh-btn:hover { opacity: 0.85; }
   .range-row {
     display: flex; align-items: center; gap: 12px;
     margin-bottom: 1.5rem;
@@ -109,7 +148,11 @@
     font-family: 'IBM Plex Mono', monospace;
     min-width: 34px; color: var(--text);
   }
-  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; table-layout: fixed; }
+  thead th:nth-child(1) { width: 15%; }
+  thead th:nth-child(2) { width: 45%; }
+  thead th:nth-child(3) { width: 25%; }
+  thead th:nth-child(4) { width: 15%; }
   thead th {
     text-align: left; font-weight: 500; color: var(--text-dim);
     font-size: 13px; padding: 10px;
@@ -117,12 +160,17 @@
     cursor: pointer; white-space: nowrap;
   }
   thead th:hover { color: var(--text); }
+  /* Which column is sorted, and which way — without this the header toggle is
+     invisible and flipping Score to ascending just looks like a broken list. */
+  thead th[data-dir] { color: var(--text); }
+  thead th[data-dir="desc"]::after { content: " \25BE"; color: var(--accent); }
+  thead th[data-dir="asc"]::after  { content: " \25B4"; color: var(--accent); }
   tbody tr.job-row {
     cursor: pointer;
     border-bottom: 1px solid var(--border);
   }
   tbody tr.job-row:hover { background: var(--surface); }
-  tbody td { padding: 12px 10px; vertical-align: top; }
+  tbody td { padding: 12px 10px; vertical-align: top; word-wrap: break-word; overflow-wrap: break-word; }
   .score-cell { display: flex; align-items: center; gap: 8px; }
   .score-bar { width: 3px; height: 18px; border-radius: 1px; flex-shrink: 0; }
   .score-num { font-family: 'IBM Plex Mono', monospace; font-weight: 500; }
@@ -133,80 +181,162 @@
   }
   .detail-row td {
     background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0;
+  }
+  .detail-content {
     font-size: 15px; color: var(--text-dim);
     padding: 14px 10px 18px;
-    border-bottom: 1px solid var(--border);
+    max-height: 500px;
+    opacity: 1;
+    overflow: hidden;
+    animation: expandRow 0.25s ease;
+    transition: max-height 0.25s ease, opacity 0.2s ease, padding 0.25s ease;
   }
+  .detail-content.closing {
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  /* Title + copy + "View posting" on one line, wrapping cleanly instead of
+     letting the buttons land mid-sentence after a long title wraps. */
+  .detail-head {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  }
+  .detail-head .label { flex: 1 1 auto; min-width: 0; }
+  .detail-head .copy-btn, .detail-head a.view-btn { margin-left: 0; }
   .detail-row .label { color: var(--text); font-weight: 500; }
   .detail-row a { color: var(--accent); text-decoration: none; }
   .detail-row a:hover { text-decoration: underline; }
   .applied-btn {
-    font-family: inherit; font-size: 13px;
-    padding: 6px 12px;
-    border: 1px solid var(--border-strong);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--text);
+    font-family: inherit; font-size: 13px; font-weight: 500;
+    padding: 7px 14px;
+    border: none;
+    border-radius: 20px;
     cursor: pointer;
     margin-top: 10px;
+    transition: opacity 0.15s ease;
   }
-  .applied-btn:hover { border-color: var(--accent); }
+  .applied-btn:hover { opacity: 0.85; }
+  .applied-btn[data-applied="true"] { background: var(--good); color: var(--bg); }
+  .applied-btn[data-applied="false"] { background: var(--mid); color: var(--bg); }
   .notion-btn {
-    font-family: inherit; font-size: 13px;
-    padding: 6px 12px;
-    border: 1px solid var(--border-strong);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--text);
+    font-family: inherit; font-size: 13px; font-weight: 500;
+    padding: 7px 14px;
+    border: none;
+    border-radius: 20px;
+    background: var(--accent);
+    color: var(--bg);
     cursor: pointer;
     margin-top: 10px;
     margin-left: 8px;
+    transition: opacity 0.15s ease;
   }
-  .notion-btn:hover { border-color: var(--accent); }
-  .notion-btn.added { border-color: var(--good); color: var(--good); }
-  .notion-btn.failed { border-color: var(--bad); color: var(--bad); }
+  .notion-btn:hover:not(:disabled) { opacity: 0.85; }
+  .notion-btn.added { background: var(--good); color: var(--bg); }
+  .notion-btn.failed { background: var(--bad); color: var(--bg); }
   .copy-btn {
     font-family: inherit; font-size: 13px;
-    padding: 6px 12px;
-    border: 1px solid var(--border-strong);
-    border-radius: 4px;
-    background: var(--bg);
+    padding: 7px 10px;
+    border: none;
+    border-radius: 20px;
+    background: var(--border-strong);
     color: var(--text);
     cursor: pointer;
     margin-left: 8px;
+    display: inline-flex;
+    align-items: center;
+    transition: opacity 0.15s ease, background 0.15s ease;
   }
-  .copy-btn:hover { border-color: var(--accent); }
-  .copy-btn.copied { border-color: var(--good); color: var(--good); }
+  .copy-btn:hover { background: var(--accent); color: var(--bg); opacity: 1; }
+  .copy-btn.copied { background: var(--good); color: var(--bg); }
+  /* Scoped under .detail-row to outrank `.detail-row a` above — otherwise the
+     link color wins and the label renders in --accent on an --accent button. */
+  .detail-row a.view-btn {
+    font-family: inherit; font-size: 13px; font-weight: 500;
+    padding: 7px 14px;
+    border: none;
+    border-radius: 20px;
+    background: var(--accent);
+    color: var(--bg);
+    cursor: pointer;
+    margin-left: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    text-decoration: none;
+    transition: opacity 0.15s ease;
+  }
+  .detail-row a.view-btn:hover { opacity: 0.85; text-decoration: none; }
   .show-applied {
     display: flex; align-items: center; gap: 6px;
     font-size: 15px; color: var(--text-dim);
   }
   .show-applied input { accent-color: var(--accent); }
+  @keyframes markApplied {
+    0% { background: transparent; opacity: 1; transform: translateX(0); }
+    25% { background: rgba(52, 211, 153, 0.18); opacity: 1; transform: translateX(0); }
+    100% { background: rgba(52, 211, 153, 0.18); opacity: 0; transform: translateX(28px); }
+  }
+  tr.row-leaving {
+    animation: markApplied 0.9s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    pointer-events: none;
+  }
+  @keyframes expandRow {
+    0% { max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; }
+    100% { max-height: 500px; opacity: 1; padding-top: 14px; padding-bottom: 18px; }
+  }
   @media (max-width: 640px) {
     body { padding: 1.25rem 1rem 3rem; }
     thead th:nth-child(3), tbody td:nth-child(3) { display: none; }
+    /* The Company column is hidden here, but the detail row's cell still spans
+       all 4. Under table-layout:fixed the declared widths then sum to 75% and
+       the leftover 25% goes to a phantom track, squeezing every visible column
+       the moment a row expands. Re-declare the three survivors to total 100%. */
+    thead th:nth-child(1) { width: 20%; }
+    thead th:nth-child(2) { width: 60%; }
+    thead th:nth-child(4) { width: 20%; }
     .stats { grid-template-columns: repeat(2, 1fr); }
     .prompt { font-size: 13px; }
-    h1 { font-size: 20px; }
+    h1 { font-size: 22px; }
     #status { font-size: 12px; }
     .stat-label { font-size: 12px; }
     .stat-value { font-size: 26px; }
     input[type=text], select, .refresh-btn { font-size: 13px; padding: 9px 10px; }
+    /* The shorthand above would undo the pills' side padding. */
+    input[type=text] { padding-left: 16px; padding-right: 16px; }
+    select { padding-left: 16px; padding-right: 20px; }
     .range-row { font-size: 13px; }
     table { font-size: 13px; }
     thead th { font-size: 12px; padding: 8px 10px; }
     tbody td { padding: 10px; }
     .resume-tag { font-size: 11px; }
     .detail-row td { font-size: 13px; padding: 12px 10px 16px; }
+    /* Narrow screens: title takes its own line, then the copy icon and the
+       link share the next one, with the link filling the remaining width for
+       a comfortable tap target. */
+    .detail-head .label { flex: 1 1 100%; }
+    .detail-head a.view-btn {
+      flex: 1 1 auto;
+      justify-content: center;
+      padding: 10px 14px;
+    }
     .show-applied { font-size: 13px; }
   }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <p class="prompt">job-match-dashboard <span class="cursor">$</span> tail -f matches</p>
-  <h1>Job match dashboard</h1>
-  <p class="nav"><a href="run.html">run scraper &rarr;</a></p>
+  <header class="page-head">
+    <div>
+      <p class="prompt">job-match-dashboard <span class="cursor">$</span> tail -f matches</p>
+      <h1>Job match dashboard</h1>
+    </div>
+    <p class="nav"><a href="run.html" class="run-link">
+      <svg viewBox="0 0 16 16" width="11" height="11" fill="currentColor" aria-hidden="true"><path d="M5 3.4v9.2a.5.5 0 0 0 .76.43l7.5-4.6a.5.5 0 0 0 0-.86l-7.5-4.6A.5.5 0 0 0 5 3.4Z"/></svg>
+      Run scraper</a></p>
+  </header>
   <div id="status">connecting...</div>
   <div class="stats" id="stats"></div>
 
@@ -218,7 +348,7 @@
       <option value="mobile_v1">Mobile</option>
       <option value="excluded_clearance">Excluded (clearance)</option>
     </select>
-    <label class="show-applied"><input type="checkbox" id="showApplied" /> Show applied</label>
+    <label class="show-applied"><input type="checkbox" id="showApplied" /> Show applied/discarded</label>
     <button class="refresh-btn" id="refreshBtn">Refresh</button>
   </div>
 
@@ -246,6 +376,8 @@ const API_URL = "http://josephs-macbook-pro.local:5050/api/matches";
 let DATA = [];
 let sortKey = "score";
 let sortDir = -1;
+// Keyed by job_id, not by row position — filters and sorts reshuffle the
+// rendered list, and a positional key would follow the slot rather than the job.
 let expanded = new Set();
 
 function resumeLabel(v) {
@@ -313,24 +445,50 @@ function renderStats(filtered) {
 }
 
 async function toggleApplied(jobId, applied) {
+  const showApplied = document.getElementById("showApplied").checked;
+  const willDisappear = applied && !showApplied;
+
+  if (willDisappear) {
+    const row = document.querySelector('tr.job-row[data-job-id="' + jobId + '"]');
+    const detailRow = row ? row.nextElementSibling : null;
+    if (row) row.classList.add("row-leaving");
+    if (detailRow && detailRow.classList.contains("detail-row")) detailRow.classList.add("row-leaving");
+  }
+
   try {
     await fetch(API_URL + "/" + jobId + "/applied", { method: applied ? "POST" : "DELETE" });
     const entry = DATA.find(d => d.job_id === jobId);
     if (entry) entry.applied = applied;
-    render();
+
+    if (willDisappear) {
+      setTimeout(() => render(), 900);  // let the highlight-then-slide-away finish before the row actually leaves
+    } else {
+      render();
+    }
   } catch (e) {
     document.getElementById("status").textContent = "could not update applied status: " + e.message;
   }
 }
 
+function updateSortIndicators() {
+  document.querySelectorAll("th[data-sort]").forEach(th => {
+    if (th.getAttribute("data-sort") === sortKey) {
+      th.setAttribute("data-dir", sortDir === -1 ? "desc" : "asc");
+    } else {
+      th.removeAttribute("data-dir");
+    }
+  });
+}
+
 function render() {
   const filtered = getFiltered();
   renderStats(filtered);
+  updateSortIndicators();
 
   document.getElementById("tbody").innerHTML = filtered.map((d, i) => {
     const t = scoreTier(d.score);
-    const isOpen = expanded.has(i);
-    let rows = '<tr class="job-row" data-idx="' + i + '">' +
+    const isOpen = expanded.has(d.job_id);
+    let rows = '<tr class="job-row" data-job-id="' + d.job_id + '">' +
       '<td><div class="score-cell"><span class="score-bar" style="background:' + t.bar + '"></span>' +
       '<span class="score-num" style="color:' + t.text + '">' + d.score + '%</span></div></td>' +
       '<td>' + d.title + '</td>' +
@@ -338,27 +496,53 @@ function render() {
       '<td><span class="resume-tag">' + resumeLabel(d.resume_version) + '</span></td>' +
       '</tr>';
     if (isOpen) {
-      rows += '<tr class="detail-row"><td colspan="4">' +
-        '<div><span class="label">' + d.title + '</span>' +
-        '<button class="copy-btn" data-copy-text="' + d.title.replace(/"/g, '&quot;') + '">copy title</button></div>' +
-        '<div style="margin-top:6px;"><span class="label">missing:</span> ' + (d.missing_skills || "none listed") + '</div>' +
-        '<div style="margin-top:6px;">' + d.reasoning + '</div>' +
-        '<div style="margin-top:6px;"><a href="' + d.url + '" target="_blank">view posting \u2192</a></div>' +
+      rows += '<tr class="detail-row"><td colspan="4"><div class="detail-content">' +
+        '<div class="detail-head"><span class="label">' + d.title + '</span>' +
+        '<button class="copy-btn" data-copy-text="' + d.title.replace(/"/g, '&quot;') + '" title="Copy title" aria-label="Copy title">' +
+        '<svg viewBox="0 0 16 16" width="13" height="13" fill="none"><rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M3 10V3.5A1.5 1.5 0 0 1 4.5 2H10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +
+        '</button>' +
+        '<a href="' + d.url + '" target="_blank" class="view-btn">' +
+        '<svg viewBox="0 0 16 16" width="12" height="12" fill="none"><path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5V10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M9 2h5v5M14 2L7 9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+        'View posting</a>' +
+        '</div>' +
+        '<div style="margin-top:6px;"><span class="label">Missing:</span> ' + (d.missing_skills || "none listed") + '</div>' +
+        '<div style="margin-top:6px;"><span class="label">Judgement:</span> ' + d.reasoning + '</div>' +
         '<button class="applied-btn" data-job-id="' + d.job_id + '" data-applied="' + (!d.applied) + '">' +
-        (d.applied ? "Mark not applied" : "Mark applied") + '</button>' +
-        '<button class="notion-btn" data-job-id="' + d.job_id + '">' +
+        (d.applied ? "Restore" : "Mark Applied / Discard") + '</button>' +
+        '<button class="notion-btn' + (d.added_to_notion ? ' added' : '') + '" data-job-id="' + d.job_id + '"' + (d.added_to_notion ? ' disabled' : '') + '>' +
         '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" style="vertical-align:-2px; margin-right:5px;"><rect x="1" y="1" width="14" height="14" rx="3" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 11.5V4.5L11.5 11.5V4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
-        'Add to Notion</button>' +
-        '</td></tr>';
+        (d.added_to_notion ? 'Added to Notion' : 'Add to Notion') + '</button>' +
+        '</div></td></tr>';
     }
     return rows;
   }).join("");
 
   document.querySelectorAll("tr.job-row").forEach(row => {
     row.addEventListener("click", () => {
-      const idx = parseInt(row.getAttribute("data-idx"), 10);
-      if (expanded.has(idx)) expanded.delete(idx); else expanded.add(idx);
-      render();
+      const jobId = row.getAttribute("data-job-id");
+      if (expanded.has(jobId)) {
+        // Closing — animate the inner content's max-height/opacity down to 0
+        // (not the <tr> itself, which can't smoothly animate height) so the
+        // row genuinely shrinks and rows below ease into the gap, rather
+        // than snapping the instant the row leaves the DOM.
+        const detailRow = row.nextElementSibling;
+        const content = detailRow && detailRow.classList.contains("detail-row")
+          ? detailRow.querySelector(".detail-content")
+          : null;
+        if (content) {
+          content.classList.add("closing");
+          setTimeout(() => {
+            expanded.delete(jobId);
+            render();
+          }, 250);
+        } else {
+          expanded.delete(jobId);
+          render();
+        }
+      } else {
+        expanded.add(jobId);
+        render();
+      }
     });
   });
 
@@ -384,8 +568,13 @@ function render() {
           console.error("Add to Notion failed:", resp.status, data);
           throw new Error(data.error || ("HTTP " + resp.status));
         }
-        btn.textContent = "Added!";
+        btn.textContent = "Added to Notion";
         btn.classList.add("added");
+        const entry = DATA.find(d => d.job_id === jobId);
+        if (entry) entry.added_to_notion = true;
+        // Adding to the tracker means you're applying — mark it applied too,
+        // reusing the same animation/state-update path as that button.
+        toggleApplied(jobId, true);
       } catch (err) {
         btn.textContent = "Failed — retry";
         btn.title = err.message;
@@ -399,17 +588,17 @@ function render() {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       const text = btn.getAttribute("data-copy-text");
+      const originalHTML = btn.innerHTML;
       try {
         await navigator.clipboard.writeText(text);
-        const original = btn.textContent;
-        btn.textContent = "copied!";
+        btn.innerHTML = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none"><path d="M3 8.5L6.5 12L13 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
         btn.classList.add("copied");
         setTimeout(() => {
-          btn.textContent = original;
+          btn.innerHTML = originalHTML;
           btn.classList.remove("copied");
         }, 1200);
       } catch (err) {
-        btn.textContent = "copy failed";
+        btn.title = "Copy failed";
       }
     });
   });
@@ -420,6 +609,9 @@ document.getElementById("resumeFilter").addEventListener("change", render);
 document.getElementById("showApplied").addEventListener("change", render);
 document.getElementById("minScore").addEventListener("input", e => {
   document.getElementById("minScoreOut").textContent = e.target.value;
+  // Moving the threshold reshuffles the whole list, so collapse any open detail
+  // row and leave it collapsed — it shouldn't pop back open on release.
+  expanded.clear();
   render();
 });
 document.getElementById("refreshBtn").addEventListener("click", loadData);

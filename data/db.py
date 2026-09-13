@@ -57,6 +57,7 @@ def init_db():
     """)
     # In case matches already exists from before applied was added.
     cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS applied BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS added_to_notion BOOLEAN DEFAULT FALSE")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS match_benchmark (
             id SERIAL PRIMARY KEY,
@@ -129,6 +130,17 @@ def mark_applied(job_id: str, applied: bool = True):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("UPDATE matches SET applied = %s WHERE job_id = %s", (applied, job_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def mark_added_to_notion(job_id: str):
+    """Marks a job as already written to Notion, so the dashboard button
+    won't create a duplicate row if clicked again."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE matches SET added_to_notion = TRUE WHERE job_id = %s", (job_id,))
     conn.commit()
     cur.close()
     conn.close()
