@@ -40,6 +40,25 @@
     text-decoration: none;
   }
   .nav a:hover { text-decoration: underline; }
+  /* Outlined pill, mirroring the "Run scraper" control on dashboard.html. */
+  .nav a.back-link {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: inherit;
+    font-size: 14px; font-weight: 500;
+    padding: 8px 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    text-decoration: none;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .nav a.back-link:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+    text-decoration: none;
+  }
   .prompt {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 14px;
@@ -47,7 +66,12 @@
     margin: 0 0 4px;
   }
   .prompt .cursor { color: var(--accent); }
-  h1 { font-size: 24px; font-weight: 500; margin: 0 0 2rem; }
+  h1 {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 2rem;
+  }
   h2 {
     font-size: 16px; font-weight: 500;
     margin: 0 0 1rem;
@@ -59,18 +83,23 @@
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     margin-bottom: 1.5rem;
   }
+  /* Pill buttons, matching dashboard.html: filled background with dark --bg
+     text, so the label always reads against the fill. */
   .run-btn {
-    font-family: inherit; font-size: 15px;
-    padding: 10px 16px;
-    border: 1px solid var(--border-strong);
-    border-radius: 4px;
-    background: var(--surface);
-    color: var(--text);
+    font-family: inherit; font-size: 15px; font-weight: 500;
+    padding: 10px 18px;
+    border: none;
+    border-radius: 20px;
+    background: var(--accent);
+    color: var(--bg);
     cursor: pointer;
+    transition: opacity 0.15s ease;
   }
-  .run-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .run-btn:hover:not(:disabled) { opacity: 0.85; }
   .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .run-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* --text, not --accent: an accent ring on an accent fill is invisible. */
+  .run-btn:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .run-btn.stop-btn { background: var(--bad); }
   .run-indicator { font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: var(--text-dim); }
   .run-indicator.active { color: var(--mid); }
   .chip {
@@ -109,14 +138,16 @@
   .log-plain { color: var(--text-dim); }
   @media (max-width: 640px) {
     body { padding: 1.25rem 1rem 3rem; }
-    h1 { font-size: 20px; }
+    h1 { font-size: 22px; }
     .log-panel { height: 40vh; min-height: 200px; font-size: 12px; }
   }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <p class="nav"><a href="dashboard.html">&larr; back to dashboard</a></p>
+  <p class="nav"><a href="dashboard.html" class="back-link">
+    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"><path d="M9.5 3.5L5 8l4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Back to dashboard</a></p>
   <p class="prompt">job-match-dashboard <span class="cursor">$</span> ./run</p>
   <h1>Run scraper / matcher</h1>
 
@@ -124,9 +155,8 @@
     <h2>Scraper</h2>
     <div class="run-section">
       <button class="run-btn" id="scraper-run">Run scraper</button>
-      <button class="run-btn" id="scraper-stop" disabled>Stop</button>
+      <button class="run-btn stop-btn" id="scraper-stop" disabled>Stop</button>
       <span class="run-indicator" id="scraper-indicator"></span>
-      <span class="chip" id="scraper-new-chip">0 new</span>
     </div>
     <pre class="log-panel" id="scraper-log"></pre>
   </section>
@@ -135,7 +165,7 @@
     <h2>Matcher</h2>
     <div class="run-section">
       <button class="run-btn" id="matcher-run">Run matcher</button>
-      <button class="run-btn" id="matcher-stop" disabled>Stop</button>
+      <button class="run-btn stop-btn" id="matcher-stop" disabled>Stop</button>
       <span class="run-indicator" id="matcher-indicator"></span>
       <span class="chip pending-chip" id="matcher-pending-chip">... pending</span>
     </div>
@@ -174,9 +204,7 @@ function setupRunner(name, opts) {
   const stopBtn = document.getElementById(name + "-stop");
   const indicator = document.getElementById(name + "-indicator");
   const logPanel = document.getElementById(name + "-log");
-  const newChip = opts.newCountChipId ? document.getElementById(opts.newCountChipId) : null;
   const pendingChip = opts.pendingChipId ? document.getElementById(opts.pendingChipId) : null;
-  let newCount = 0;
   let pendingCount = null;
 
   async function refreshPendingCount() {
@@ -200,11 +228,6 @@ function setupRunner(name, opts) {
     logPanel.style.display = "block";
     appendLine(line);
     logPanel.scrollTop = logPanel.scrollHeight;
-
-    if (newChip && /^Parsed \(stored\):/.test(line)) {
-      newCount++;
-      newChip.textContent = newCount + " new";
-    }
 
     // A job was handled (scored or clearance-excluded) this run — reflect
     // that immediately in the pending count, even before the run finishes.
@@ -254,10 +277,6 @@ function setupRunner(name, opts) {
     const token = getToken();
     if (!token) return;
     logPanel.innerHTML = "";
-    if (newChip) {
-      newCount = 0;
-      newChip.textContent = "0 new";
-    }
     setRunning(true);
     indicator.textContent = "starting...";
     try {
@@ -321,7 +340,7 @@ async function checkRunStatus(name, runner) {
   } catch (e) { /* ignore */ }
 }
 
-const scraperRunner = setupRunner("scraper", { newCountChipId: "scraper-new-chip" });
+const scraperRunner = setupRunner("scraper");
 const matcherRunner = setupRunner("matcher", { pendingChipId: "matcher-pending-chip" });
 
 scraperRunner.loadExistingLog();
