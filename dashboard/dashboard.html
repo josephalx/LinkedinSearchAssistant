@@ -375,16 +375,20 @@ function render() {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       const jobId = btn.getAttribute("data-job-id");
-      const original = btn.textContent;
       btn.disabled = true;
       btn.textContent = "Adding...";
       try {
         const resp = await fetch(API_URL + "/" + jobId + "/add-to-notion", { method: "POST" });
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          console.error("Add to Notion failed:", resp.status, data);
+          throw new Error(data.error || ("HTTP " + resp.status));
+        }
         btn.textContent = "Added!";
         btn.classList.add("added");
       } catch (err) {
         btn.textContent = "Failed — retry";
+        btn.title = err.message;
         btn.classList.add("failed");
         btn.disabled = false;
       }
