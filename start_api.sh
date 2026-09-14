@@ -6,6 +6,10 @@
 #   ./start_api.sh dry      # same, explicit
 #   ./start_api.sh prod     # dashboard-triggered scraper/matcher runs will write to the DB
 #
+# Scraper engine (which implementation the dashboard's "Run scraper" launches):
+#   ./start_api.sh                           # Playwright port (default, headless)
+#   SCRAPER_ENGINE=selenium ./start_api.sh   # the original Selenium scraper (headed)
+#
 # One-time setup: chmod +x start_api.sh
 
 set -euo pipefail
@@ -28,5 +32,8 @@ else
   export SCRAPER_DRY_RUN=0
   export MATCHER_DRY_RUN=0
 fi
+
+# Passed through to api.py, which picks the scraper script from it.
+export SCRAPER_ENGINE="${SCRAPER_ENGINE:-playwright}"
 
 exec "$PYTHON" -u "$SCRIPT_DIR/dashboard/api.py"

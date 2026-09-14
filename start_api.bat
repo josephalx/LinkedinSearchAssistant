@@ -29,4 +29,7 @@ if /I "%MODE%"=="dry" (
     set "MATCHER_DRY_RUN=0"
 )
 
+rem Which scraper the dashboard launches; set SCRAPER_ENGINE=selenium for the original.
+if not defined SCRAPER_ENGINE set "SCRAPER_ENGINE=playwright"
+
 "%PYTHON%" -u "%SCRIPT_DIR%dashboard\api.py"
