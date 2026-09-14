@@ -8,24 +8,29 @@ job tracker, from your browser or phone.
 ## How it fits together
 
 ```
-scripts/scrapper.py  -->  Postgres (jobs table)
-                                 |
-                                 v   (automatically, at the end of every scrape)
-                       scripts/dedupe_agent.py  -- prunes duplicate jobs
-                                 |
-                                 v
-                       scripts/matcher.py  -->  Postgres (matches table)
-                                                         |
-                                                         v
-                                 dashboard/api.py  -->  dashboard/dashboard.html
-                                       |      |
-                                       |      +-->  data/notion.py  -->  Notion tracker
+scripts/scrapper.py             (Selenium, headed)
+scripts/scrapper_playwright.py  (Playwright, headless — dashboard default)
+              |
+              v
+     Postgres (jobs table)
+              |
+              v   (automatically, at the end of every scrape)
+     scripts/dedupe_agent.py  -- prunes duplicate jobs
+              |
+              v
+     scripts/matcher.py  -->  Postgres (matches table)
                                        |
-                                 dashboard/run.html (trigger + live logs)
+                                       v
+               dashboard/api.py  -->  dashboard/dashboard.html
+                     |      |
+                     |      +-->  data/notion.py  -->  Notion tracker
+                     |
+               dashboard/run.html (trigger + live logs)
 ```
 
 - **`scripts/scrapper.py`** — Selenium scrapes LinkedIn's public (logged-out) job search, stores parsed postings in the `jobs` table.
-- **`scripts/dedupe_agent.py`** — runs automatically at the end of every `scrapper.py` run: finds jobs sharing a normalized (title, company) but with different JD text, and asks an LLM whether they're the same posting. Duplicates are removed before scoring; distinct ones are flagged so they're never re-examined. Can also be run on its own: `python3 scripts/dedupe_agent.py`.
+- **`scripts/scrapper_playwright.py`** — a Playwright port of the scraper: same selectors, same DB writes, same dedupe hand-off. Runs headless, blocks images/fonts/CSS, and adds env knobs for capping a run. This is what the dashboard launches by default.
+- **`scripts/dedupe_agent.py`** — runs automatically at the end of every scrape (either engine): finds jobs sharing a normalized (title, company) but with different JD text, and asks an LLM whether they're the same posting. Duplicates are removed before scoring; distinct ones are flagged so they're never re-examined. Can also be run on its own: `python3 scripts/dedupe_agent.py`.
 - **`scripts/matcher.py`** — classifies each job (mobile vs. software engineering) and scores it against the matching resume via OpenRouter, storing results in `matches`.
 - **`data/db.py`** — all Postgres connection/schema logic. **This is where DB credentials live.**
 - **`data/notion.py`** — pushes a job into your Notion job-tracker database. Reads the database's real property schema first and shapes the payload to match, so it works whether a column came through the CSV import as Text or Select.
@@ -50,8 +55,13 @@ scripts/scrapper.py  -->  Postgres (jobs table)
 From the project root, ideally inside a virtual environment (`.venv`):
 
 ```bash
-pip install selenium psycopg2-binary requests python-docx keyring flask flask-cors flask-socketio
+pip install selenium psycopg2-binary requests python-docx keyring flask flask-cors flask-socketio playwright
+python3 -m playwright install chromium
 ```
+
+The second line downloads the browser binaries Playwright drives (~100 MB) —
+both the headless shell and the full Chromium. It's separate from `pip install`
+and easy to forget; without it the Playwright scraper fails at launch.
 
 ## 3. Database setup
 
@@ -123,12 +133,17 @@ Update these paths if the resumes move, or if setting this up on a different mac
 ### Scraper / matcher directly (terminal)
 
 ```bash
-./run.sh scraper dry     # scrapes and parses, no DB writes
-./run.sh scraper prod    # real run, writes to `jobs`
-./run.sh matcher dry     # scores via real API calls, no DB writes
-./run.sh matcher prod    # real run, writes to `matches`
+./run.sh scraper dry        # Selenium scraper, no DB writes
+./run.sh scraper prod       # real run, writes to `jobs`
+./run.sh scraper-pw dry     # Playwright scraper (headless), no DB writes
+./run.sh scraper-pw prod    # real run, writes to `jobs`
+./run.sh matcher dry        # scores via real API calls, no DB writes
+./run.sh matcher prod       # real run, writes to `matches`
 ```
 (`run.bat` on Windows, same arguments.) First time on Mac/Linux: `chmod +x run.sh`.
+
+`scraper` and `scraper-pw` write identical rows and both read `SCRAPER_DRY_RUN`,
+so they're interchangeable — the difference is only which browser driver runs.
 
 ### The dashboard
 
@@ -136,6 +151,9 @@ Start the API first:
 ```bash
 ./start_api.sh          # dashboard-triggered runs default to dry-run
 ./start_api.sh prod     # dashboard-triggered runs will write to the DB
+
+# which scraper the dashboard's "Run scraper" button launches:
+SCRAPER_ENGINE=selenium ./start_api.sh    # the original (opens a Chrome window)
 ```
 (`start_api.bat` on Windows.)
 
@@ -234,6 +252,58 @@ Start the API, open the dashboard, expand any job, and click **Add to Notion**.
 The button turns green and reads "Added to Notion", and the row appears in
 Notion. On failure the dashboard surfaces the API error directly — in practice
 almost always `404` (not shared, or wrong ID) or `401` (bad token).
+
+## 9. Scraper engines (Selenium vs. Playwright)
+
+There are two interchangeable scrapers. They use the same selectors, write the
+same rows, respect the same `SCRAPER_DRY_RUN` flag, and both hand off to
+`dedupe_agent.py` when they finish.
+
+**The dashboard launches the Playwright one by default.** `start_api.sh` sets
+`SCRAPER_ENGINE=playwright` unless you override it:
+
+```bash
+./start_api.sh                            # Playwright (headless)
+SCRAPER_ENGINE=selenium ./start_api.sh    # the original Selenium scraper
+```
+
+The variable is read **once, when the API starts** — not when you press the
+button. Check which one is active either from the line the API prints on
+startup (`Scraper engine: playwright (scrapper_playwright.py)`) or from
+`GET /api/run-status`, which reports `scraper_engine`.
+
+| | `scrapper.py` (Selenium) | `scrapper_playwright.py` |
+| --- | --- | --- |
+| Browser window | **Headed** — a Chrome window opens | Headless (set `SCRAPER_HEADED=1` to watch) |
+| Images / fonts / CSS | Downloaded | Blocked — nothing here reads layout or pixels |
+| Pages per keyword | Hardcoded at 40 | `SCRAPER_MAX_PAGES`, default 40 |
+| Auth-wall detection | URL only — **never actually fires**, so the wall shows up as a 15s timeout reported as "No results found" | Checks page markup too, so it's caught and reported immediately |
+| Stop button | Process is killed outright | Closes the browser cleanly, then skips dedup |
+
+### Capping a run (Playwright only)
+
+A full run is 3 keywords x 40 pages x 25 jobs = **3,000 jobs maximum**, though
+the auth wall normally ends it sooner — and at roughly 11s per job (nearly all
+of it deliberate `random_delay` jitter) even a partial run takes hours. These
+env vars scope it down:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SCRAPER_MAX_PAGES` | `40` | Search pages per keyword |
+| `SCRAPER_MAX_JOBS` | `25` | Jobs taken from each page |
+| `SCRAPER_KEYWORDS` | the three in the file | Comma-separated override |
+| `SCRAPER_HEADED` | unset | `1` shows the browser |
+
+```bash
+# quick smoke test — 10 jobs, one keyword, nothing written
+SCRAPER_DRY_RUN=1 SCRAPER_MAX_PAGES=1 SCRAPER_MAX_JOBS=10 \
+  SCRAPER_KEYWORDS="android engineer" \
+  .venv/bin/python -u scripts/scrapper_playwright.py
+```
+
+In headed mode the pages render unstyled, because stylesheets are blocked —
+that's expected, not a bug. Comment out the `context.route(...)` call in
+`init_browser()` if you want it to look normal while watching.
 
 ## Notes
 
