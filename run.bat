@@ -5,10 +5,12 @@ rem run.bat — run the scraper or matcher, in dry-run or prod mode. Windows
 rem equivalent of run.sh.
 rem
 rem Usage:
-rem   run.bat scraper dry     scrapes and prints, no DB writes
-rem   run.bat scraper prod    real run, writes to `jobs`
-rem   run.bat matcher dry     scores via real API calls, no DB writes
-rem   run.bat matcher prod    real run, writes to `matches`
+rem   run.bat scraper dry      scrapes and prints, no DB writes
+rem   run.bat scraper prod     real run, writes to `jobs`
+rem   run.bat scraper-pw dry   same, via the Playwright port (headless)
+rem   run.bat scraper-pw prod  real run, writes to `jobs`
+rem   run.bat matcher dry      scores via real API calls, no DB writes
+rem   run.bat matcher prod     real run, writes to `matches`
 
 set "SCRIPT_DIR=%~dp0"
 set "PYTHON=%SCRIPT_DIR%.venv\Scripts\python.exe"
@@ -19,11 +21,15 @@ set "MODE=%~2"
 if "%TARGET%"=="" goto usage
 if "%MODE%"=="" goto usage
 
-if /I not "%TARGET%"=="scraper" if /I not "%TARGET%"=="matcher" goto usage
+if /I not "%TARGET%"=="scraper" if /I not "%TARGET%"=="scraper-pw" if /I not "%TARGET%"=="matcher" goto usage
 if /I not "%MODE%"=="dry" if /I not "%MODE%"=="prod" goto usage
 
 if /I "%TARGET%"=="scraper" (
     set "SCRIPT=%SCRIPT_DIR%scripts\scrapper.py"
+    set "ENV_VAR=SCRAPER_DRY_RUN"
+) else if /I "%TARGET%"=="scraper-pw" (
+    rem Same dry-run flag as the Selenium scraper — both read SCRAPER_DRY_RUN.
+    set "SCRIPT=%SCRIPT_DIR%scripts\scrapper_playwright.py"
     set "ENV_VAR=SCRAPER_DRY_RUN"
 ) else (
     set "SCRIPT=%SCRIPT_DIR%scripts\matcher.py"
@@ -42,5 +48,5 @@ if /I "%MODE%"=="dry" (
 exit /b %ERRORLEVEL%
 
 :usage
-echo Usage: run.bat ^<scraper^|matcher^> ^<dry^|prod^>
+echo Usage: run.bat ^<scraper^|scraper-pw^|matcher^> ^<dry^|prod^>
 exit /b 1

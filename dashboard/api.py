@@ -47,6 +47,20 @@ if not RUN_TOKEN:
     print("  Set one via keyring: python3 -c \"import keyring; keyring.set_password('linkedinbot', 'dashboard_token', 'your-token')\"")
     print("  ...or via env:       export LINKEDINBOT_DASHBOARD_TOKEN='your-token'")
 
+# Which scraper implementation dashboard-triggered runs launch. Defaults to the
+# Selenium one; set SCRAPER_ENGINE=playwright (see start_api.sh) to use the
+# Playwright port instead. Both write the same rows and hand off to the same
+# dedupe step, so this is safe to flip between runs.
+SCRAPER_ENGINE = (os.environ.get("SCRAPER_ENGINE") or "selenium").strip().lower()
+SCRAPER_SCRIPT = os.path.join(
+    SCRIPTS_DIR,
+    "scrapper_playwright.py" if SCRAPER_ENGINE == "playwright" else "scrapper.py",
+)
+if SCRAPER_ENGINE not in ("selenium", "playwright"):
+    print(f"WARNING: unknown SCRAPER_ENGINE={SCRAPER_ENGINE!r} — falling back to selenium.")
+    SCRAPER_ENGINE = "selenium"
+print(f"Scraper engine: {SCRAPER_ENGINE} ({os.path.basename(SCRAPER_SCRIPT)})")
+
 SCRAPER_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper_run.log")
 SCRAPER_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper.lock")
 scraper_lock = threading.Lock()
@@ -110,7 +124,7 @@ def run_scraper_background():
 
     with open(SCRAPER_LOG, "w") as log:
         proc = subprocess.Popen(
-            [sys.executable, "-u", os.path.join(SCRIPTS_DIR, "scrapper.py")],
+            [sys.executable, "-u", SCRAPER_SCRIPT],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -283,6 +297,7 @@ def run_status():
         "matcher_running": matcher_lock.locked(),
         "scraper_dry_run": dry_run_enabled("SCRAPER_DRY_RUN"),
         "matcher_dry_run": dry_run_enabled("MATCHER_DRY_RUN"),
+        "scraper_engine": SCRAPER_ENGINE,
     })
 
 
