@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import random
+import signal
 import keyring
 
 # Debug dumps land in the project root, one level up from scripts/;
@@ -68,6 +69,25 @@ def init_driver():
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
     return driver
+
+
+class Interrupted(Exception):
+    """Raised when the dashboard's Stop button (or Ctrl-C) asks us to quit."""
+
+
+def _handle_stop(signum, frame):
+    raise Interrupted(f"signal {signum}")
+
+
+# The dashboard stops a run with SIGTERM to the whole process group
+# (api.py:stop_scraper). Python's default handler for SIGTERM terminates the
+# process immediately without unwinding, so driver.quit() and the dedupe
+# hand-off below never actually ran on a Stop click — the browser was left
+# orphaned and nothing got cleaned up. Turning the signal into a catchable
+# exception lets the finally block below run a real, ordered shutdown
+# instead (same fix as scrapper_playwright.py).
+signal.signal(signal.SIGTERM, _handle_stop)
+signal.signal(signal.SIGINT, _handle_stop)
 
 
 # Logged-out search removes account-ban risk entirely (no account to restrict),
@@ -261,6 +281,7 @@ def main():
     else:
         db.init_db()
     driver = init_driver()
+    interrupted = False
     try:
         all_jobs = []
         new_counts = {}  # source_keyword -> count of genuinely new DB inserts
@@ -280,13 +301,22 @@ def main():
         print(f"  TOTAL NEW: {total_new}")
 
         return all_jobs
+    except Interrupted:
+        interrupted = True
+        print("\n=== Stopped — closing the browser cleanly ===")
+        return []
     finally:
         driver.quit()
-        # Runs after the browser closes (pure DB + API calls from here) —
-        # always, every scraper run, whether triggered from the terminal or
-        # the dashboard. Uses the same SCRAPER_DRY_RUN flag as the rest of
-        # this script, so a dashboard dry-run never deletes anything either.
-        dedupe_agent.run_cleanup()
+        if interrupted:
+            # Matches scrapper_playwright.py's behaviour on Stop: skip firing
+            # dedup's LLM calls right after the user asked the run to stop.
+            print("=== Skipping dedup check (run was stopped early) ===")
+        else:
+            # Runs after the browser closes (pure DB + API calls from here) —
+            # on every completed run, whether triggered from the terminal or
+            # the dashboard. Uses the same SCRAPER_DRY_RUN flag as the rest of
+            # this script, so a dashboard dry-run never deletes anything either.
+            dedupe_agent.run_cleanup()
 
 
 if __name__ == "__main__":
