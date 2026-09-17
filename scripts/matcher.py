@@ -37,7 +37,20 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
 import db
 
 
-OPENROUTER_API_KEY = keyring.get_password("openrouter", "api_key") or os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_API_KEY = keyring.get_password("openrouter", "api_key_backup") or os.environ.get("OPENROUTER_API_KEY")
+
+# Optional attribution header — names this app in OpenRouter's activity view
+# and public app rankings. The documented header is "X-Title"; OpenRouter
+# ignores anything else, so the name has to be exact. Its companion is
+# "HTTP-Referer" (a URL), only worth setting if this ever gets a public page.
+APP_TITLE = os.environ.get("OPENROUTER_APP_TITLE", "LinkedinBot")
+
+# Shared by every OpenRouter call, including the ones dedupe_agent.py and
+# comparison_benchmark.py make through call_model().
+OPENROUTER_HEADERS = {
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+    "X-Title": APP_TITLE,
+}
 
 # Dry-run mode: set MATCHER_DRY_RUN=1 to score jobs normally (still calls both
 # models, still costs API quota) but skip writing anything to `matches` —
@@ -49,7 +62,7 @@ DRY_RUN = os.environ.get("MATCHER_DRY_RUN", "").lower() in ("1", "true", "yes")
 # Two models, two separate OpenRouter rate-limit pools — classification calls
 # don't eat into the scoring model's daily quota, and vice versa.
 CLASSIFIER_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
-SCORER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+SCORER_MODEL = "inclusionai/ling-3.0-flash-vl:free"
 
 RESUMES = {
     "software_engineering_v1": "/Users/joseph/Documents/Resume/Chakola_Joseph_Resume_Software_Engineering.docx",
@@ -174,7 +187,7 @@ def call_model(model, prompt, retries=2):
         try:
             resp = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                headers=OPENROUTER_HEADERS,
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],

@@ -134,6 +134,7 @@
   .log-panel { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
   .log-header { color: var(--accent); font-weight: 500; }
   .log-ok { color: var(--good); }
+  .log-bad { color: var(--bad); }
   .log-warn { color: var(--mid); }
   .log-plain { color: var(--text-dim); }
   @media (max-width: 640px) {
@@ -190,9 +191,14 @@ function escapeHtml(s) {
 }
 
 function classifyLine(line) {
+  const scoreMatch = line.match(/^\[(\d+)%\]/);
+  if (scoreMatch) {
+    const score = parseInt(scoreMatch[1], 10);
+    return score >= 70 ? "log-ok" : "log-bad";
+  }
   if (/^===|^---/.test(line)) return "log-header";
   if (/skipped|error|failed|excluded/i.test(line)) return "log-warn";
-  if (/parsed \(|^\[\d/.test(line)) return "log-ok";
+  if (/parsed \(/.test(line)) return "log-ok";
   return "log-plain";
 }
 
