@@ -61,6 +61,13 @@ if SCRAPER_ENGINE not in ("selenium", "playwright"):
     SCRAPER_ENGINE = "selenium"
 print(f"Scraper engine: {SCRAPER_ENGINE} ({os.path.basename(SCRAPER_SCRIPT)})")
 
+# Search pages per keyword for dashboard-triggered runs. At 10 jobs per page
+# this is 1000 jobs per keyword; the auth wall usually ends a run well before
+# that. Playwright-only — scrapper.py hardcodes 40 pages internally.
+SCRAPER_MAX_PAGES = int(os.environ.get("SCRAPER_MAX_PAGES", "100"))
+if SCRAPER_ENGINE == "playwright":
+    print(f"Scraper pages per keyword: {SCRAPER_MAX_PAGES} (~{SCRAPER_MAX_PAGES * 10} jobs/keyword ceiling)")
+
 SCRAPER_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper_run.log")
 SCRAPER_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper.lock")
 scraper_lock = threading.Lock()
@@ -121,6 +128,10 @@ def run_scraper_background():
 
     env = dict(os.environ)
     env.setdefault("SCRAPER_DRY_RUN", "1")  # only fills in if start_api.sh didn't already set it
+    # The guest feed returns 10 jobs per request, so 100 pages = 1000 jobs per
+    # keyword. Only the Playwright scraper reads this; scrapper.py hardcodes its
+    # page count. setdefault, so an explicit env var still wins.
+    env.setdefault("SCRAPER_MAX_PAGES", str(SCRAPER_MAX_PAGES))
 
     with open(SCRAPER_LOG, "w") as log:
         proc = subprocess.Popen(
