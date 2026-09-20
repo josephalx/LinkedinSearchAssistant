@@ -13,7 +13,7 @@ only the model slugs differ.
 
 Usage:
     python3 scripts/comparison_benchmark.py [path/to/matches_export.json]
-    (defaults to results/matches_export.json)
+    (defaults to benchmarks_results/matches_export.json)
 
 Output:
     benchmarks_results/benchmark_comparison_<model>.json — old score/reasoning
@@ -39,10 +39,15 @@ import matcher  # reuse build_classifier_prompt, build_prompt, call_model,
 BENCHMARK_CLASSIFIER_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 BENCHMARK_SCORER_MODEL = "inclusionai/ling-3.0-flash-vl:free"
 
-# Reads the export from results/; the comparison dump lands in benchmarks_results/.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_INPUT = os.path.join(PROJECT_ROOT, "results", "matches_export.json")
 BENCHMARKS_DIR = os.path.join(PROJECT_ROOT, "benchmarks_results")
+
+# Input and output both live in benchmarks_results/. Deliberately NOT
+# results/matches_export.json: export_matches.py writes a 10-job "what to apply
+# to next" shortlist there, which would silently shrink every benchmark to 10
+# jobs. This is a separate, larger, stable sample so runs stay comparable
+# across models.
+DEFAULT_INPUT = os.path.join(BENCHMARKS_DIR, "matches_export.json")
 OUTPUT_PATH = os.path.join(BENCHMARKS_DIR, "benchmark_comparison_ling-vl.json")
 
 
