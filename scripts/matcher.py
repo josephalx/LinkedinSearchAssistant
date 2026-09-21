@@ -28,8 +28,9 @@ import random
 import keyring
 
 
-import requests
 from docx import Document
+from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 # db.py lives in data/, a sibling of scripts/
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,20 +38,127 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
 import db
 
 
-OPENROUTER_API_KEY = keyring.get_password("openrouter", "api_key_backup") or os.environ.get("OPENROUTER_API_KEY")
+# ---- Routers ------------------------------------------------------------
+#
+# Any OpenAI-compatible gateway works. A router is just a base URL plus where
+# to find its key; add an entry here and it becomes usable by name everywhere
+# (matcher, dedupe_agent, both benchmarks).
+#
+# Pick one with LLM_ROUTER=orcarouter, or point somewhere unlisted with
+# LLM_BASE_URL=https://… (plus LLM_API_KEY). comparison_benchmark.py can also
+# pass a client straight to call_model(), so a single run can compare routers.
+ROUTERS = {
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_key": "OPENROUTER_API_KEY",
+        "keyring": ("openrouter", "api_key"),
+    },
+    "orcarouter": {
+        "base_url": "https://api.orcarouter.ai/v1",
+        "env_key": "ORCAROUTER_API_KEY",
+        "keyring": ("orcarouter", "api_key"),
+    },
+}
+
+DEFAULT_ROUTER = os.environ.get("LLM_ROUTER", "openrouter").strip().lower()
 
 # Optional attribution header — names this app in OpenRouter's activity view
-# and public app rankings. The documented header is "X-Title"; OpenRouter
-# ignores anything else, so the name has to be exact. Its companion is
-# "HTTP-Referer" (a URL), only worth setting if this ever gets a public page.
+# and public app rankings. The documented header is "X-Title"; anything else
+# is ignored, so the name has to be exact. Its companion is "HTTP-Referer"
+# (a URL), only worth setting if this ever gets a public page.
 APP_TITLE = os.environ.get("OPENROUTER_APP_TITLE", "LinkedinBot")
+DEFAULT_HEADERS = {"X-Title": APP_TITLE}
 
-# Shared by every OpenRouter call, including the ones dedupe_agent.py and
-# comparison_benchmark.py make through call_model().
-OPENROUTER_HEADERS = {
-    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "X-Title": APP_TITLE,
-}
+# Reasoning tokens. Off by default: enabling it changes what the model
+# produces and what it costs, so turning it on mid-benchmark would make runs
+# non-comparable. MATCHER_REASONING=1 switches it on for every call.
+REASONING_ENABLED = os.environ.get("MATCHER_REASONING", "").lower() in ("1", "true", "yes")
+
+# Streaming stays on: tokens arriving incrementally reset the read-timeout
+# clock, which is what stopped slower models timing out mid-response.
+STREAMING = os.environ.get("MATCHER_STREAM", "1").lower() in ("1", "true", "yes")
+
+REQUEST_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "60"))
+
+# Requests-per-minute ceiling, applied per REQUEST rather than per job. This
+# matters because scoring a job costs two calls (classify + score): a per-job
+# sleep still lets those two fire back to back, so a 15 RPM account gets
+# tripped even with a generous gap between jobs.
+#
+# 0 (the default) disables it, leaving the existing per-job sleeps as the only
+# pacing. Set LLM_RPM=15 for a model with that limit.
+RPM_LIMIT = float(os.environ.get("LLM_RPM", "0"))
+MIN_REQUEST_INTERVAL = 60.0 / RPM_LIMIT if RPM_LIMIT > 0 else 0.0
+
+_last_request_at = 0.0
+
+
+def _throttle():
+    """Hold off until MIN_REQUEST_INTERVAL has passed since the last request.
+
+    Single-threaded by assumption — matcher, dedupe_agent and the benchmarks
+    all run their calls sequentially, so a plain module-level timestamp is
+    enough and avoids dragging a lock into the hot path.
+    """
+    global _last_request_at
+    if MIN_REQUEST_INTERVAL <= 0:
+        return
+    wait = MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_request_at = time.monotonic()
+
+
+def resolve_api_key(router_name):
+    """Key for a router: its own env var first, then keyring, then the
+    generic LLM_API_KEY. Returns None if nothing is configured."""
+    spec = ROUTERS.get(router_name, {})
+    env_key = spec.get("env_key")
+    if env_key and os.environ.get(env_key):
+        return os.environ[env_key]
+    kr = spec.get("keyring")
+    if kr:
+        for username in (kr[1], f"{kr[1]}_backup"):
+            value = keyring.get_password(kr[0], username)
+            if value:
+                return value
+    return os.environ.get("LLM_API_KEY")
+
+
+_client_cache = {}
+
+
+def make_client(base_url=None, api_key=None, router=None):
+    """An OpenAI client for a given gateway, cached per (base_url, key).
+
+    Cached because the SDK holds a connection pool — building a fresh client
+    per call would discard keep-alive and slow every request down.
+    """
+    router = (router or DEFAULT_ROUTER).strip().lower()
+    if base_url is None:
+        base_url = os.environ.get("LLM_BASE_URL") or ROUTERS.get(router, {}).get(
+            "base_url", ROUTERS["openrouter"]["base_url"])
+    if api_key is None:
+        api_key = resolve_api_key(router)
+
+    cache_key = (base_url, api_key)
+    if cache_key not in _client_cache:
+        _client_cache[cache_key] = OpenAI(
+            base_url=base_url,
+            api_key=api_key or "missing",
+            default_headers=DEFAULT_HEADERS,
+            timeout=REQUEST_TIMEOUT,
+            max_retries=0,  # we do our own, with router-aware error classification
+        )
+    return _client_cache[cache_key]
+
+
+# The default client every caller gets unless one is passed explicitly.
+client = make_client()
+
+# Kept for callers that still read these names.
+OPENROUTER_BASE_URL = str(client.base_url)
+OPENROUTER_API_KEY = resolve_api_key(DEFAULT_ROUTER)
 
 # Dry-run mode: set MATCHER_DRY_RUN=1 to score jobs normally (still calls both
 # models, still costs API quota) but skip writing anything to `matches` —
@@ -136,122 +244,219 @@ def extract_error(data):
     return None
 
 
-def dispatch_error(error, resp, model, attempt):
-    """Shared error-handling logic for both pre-stream (plain error status)
-    and mid-stream (SSE error event) cases — same dispatch either way, since
-    OpenRouter uses the same error_type vocabulary in both places.
+def dispatch_error(error, status, retry_after, model, attempt):
+    """Shared error-handling logic for both request-stage failures and
+    mid-stream error events — same dispatch either way, since OpenRouter uses
+    the same error_type vocabulary in both places.
+
+    `status` is the HTTP status (or None mid-stream) and `retry_after` the
+    Retry-After header value (or None). Taking them as plain arguments keeps
+    this independent of whichever HTTP client produced them.
 
     Returns "retry" (caller should continue the retry loop) or "stop"
     (caller should give up on this call and return None). Raises
     FatalAPIError directly for run-ending problems.
     """
-    error_type = error.get("metadata", {}).get("error_type")
-    code = error.get("code", resp.status_code)
+    metadata = error.get("metadata") or {}
+    error_type = metadata.get("error_type")
+    code = error.get("code", status)
 
-    if error_type == "rate_limit_exceeded" or code == 429:
-        retry_after = resp.headers.get("Retry-After")
-        wait = float(retry_after) if retry_after else 2 ** (attempt + 1)
-        print(f"  Rate limited on {model}; waiting {wait}s before retry.")
+    def backoff(label):
+        wait = 2 ** (attempt + 1)
+        if retry_after:
+            try:
+                wait = float(retry_after)
+            except (TypeError, ValueError):
+                pass
+        print(f"  {label} on {model}; waiting {wait}s before retry.")
         time.sleep(wait)
         return "retry"
+
+    # Checked before the 429 branch on purpose: gateways return 429 both for
+    # genuine rate limiting and for "this model isn't available to your
+    # account", and only this flag tells them apart. Without it a permanent
+    # denial burns every retry on every pass before the run gives up.
+    if metadata.get("retryable") is False:
+        raise FatalAPIError(f"{model}: {error.get('message')} (marked non-retryable)")
+
+    if error_type == "rate_limit_exceeded" or code == 429:
+        return backoff("Rate limited")
 
     if error_type == "payment_required" or code == 402:
         raise FatalAPIError(f"{model}: out of credits (402). Add credits and rerun.")
 
-    if error_type == "authentication" or code == 401:
-        raise FatalAPIError(f"{model}: invalid API key (401). Check OPENROUTER_API_KEY.")
+    if error_type == "authentication" or code in (401, 403):
+        raise FatalAPIError(f"{model}: invalid API key ({code}). Check OPENROUTER_API_KEY.")
 
-    if error_type in ("provider_overloaded", "provider_unavailable", "server", "timeout", "unmapped") or code in (502, 503, 504) or code >= 500:
-        retry_after = resp.headers.get("Retry-After")
-        wait = float(retry_after) if retry_after else 2 ** (attempt + 1)
-        print(f"  Transient error ({error_type or code}) from {model}; waiting {wait}s before retry.")
-        time.sleep(wait)
-        return "retry"
+    if (error_type in ("provider_overloaded", "provider_unavailable", "server", "timeout", "unmapped")
+            or (isinstance(code, int) and code >= 500)):
+        return backoff(f"Transient error ({error_type or code})")
 
     print(f"  Non-retryable error from {model}: {error.get('message')} (error_type={error_type})")
     return "stop"
 
 
-def call_model(model, prompt, retries=2):
-    """Streams the response (stream: true) instead of waiting for one big
-    JSON blob — tokens arriving incrementally reset the read-timeout clock,
-    which avoids "Read timed out" failures on slower models (e.g. Nemotron
-    3 Ultra's measured ~3 tokens/sec, which can take 50-65s+ to fully
-    generate a response on its own — right up against a 60s timeout even
-    with zero queue delay). Errors can arrive two ways per OpenRouter's docs:
-    a plain error status before any tokens (pre-stream), or an SSE event
-    mid-stream after the 200 OK is already committed — both go through the
-    same dispatch_error() so behavior matches the old non-streaming path.
+# Tally of how each call was billed, filled in by record_usage(). A caller can
+# print this at the end of a run — see comparison_benchmark.py.
+BYOK_STATS = {"byok": 0, "shared": 0, "unknown": 0}
+
+
+def record_usage(model, usage):
+    """Log how a completed call was billed.
+
+    OpenRouter's is_byok is True when the call went through your own provider
+    key, False when it silently fell back to OpenRouter's shared credits.
+    Only the fallback is worth printing per-call — that's the case that costs
+    credits you didn't intend to spend.
     """
+    if not usage:
+        BYOK_STATS["unknown"] += 1
+        return
+
+    is_byok = usage.get("is_byok")
+    if is_byok is True:
+        BYOK_STATS["byok"] += 1
+    elif is_byok is False:
+        BYOK_STATS["shared"] += 1
+        cost = usage.get("cost")
+        print(f"  NOTE: {model} call was NOT billed to your key "
+              f"(is_byok=false, fell back to OpenRouter credits"
+              f"{f', cost={cost}' if cost is not None else ''})")
+    else:
+        # Field absent — older endpoint, or usage accounting not honoured.
+        BYOK_STATS["unknown"] += 1
+
+
+def byok_summary():
+    """One-line billing summary for the end of a run."""
+    s = BYOK_STATS
+    total = s["byok"] + s["shared"] + s["unknown"]
+    if not total:
+        return "No model calls made."
+    parts = [f"{s['byok']} on your key"]
+    if s["shared"]:
+        parts.append(f"{s['shared']} on OpenRouter credits")
+    if s["unknown"]:
+        parts.append(f"{s['unknown']} unreported")
+    return f"Billing: {total} call(s) — " + ", ".join(parts)
+
+
+def _chunk_dict(obj):
+    """SDK objects as plain dicts, including fields the SDK doesn't model.
+
+    OpenRouter puts provider errors and is_byok in places the OpenAI schema
+    doesn't declare; pydantic keeps those in model_extra rather than dropping
+    them, and model_dump() surfaces the lot.
+    """
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    dump = getattr(obj, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump()
+        except Exception:
+            pass
+    return getattr(obj, "__dict__", {}) or {}
+
+
+def _usage_dict(obj):
+    """The usage object off a chunk or a completion, as a plain dict."""
+    return _chunk_dict(getattr(obj, "usage", None))
+
+
+def call_model(model, prompt, retries=2, client=None):
+    """One chat completion, with retry and OpenRouter-aware error handling.
+
+    Goes through the OpenAI SDK pointed at OpenRouter's base URL. Streaming
+    stays on by default (MATCHER_STREAM=0 disables it): tokens arriving
+    incrementally reset the read-timeout clock, which is what stopped "Read
+    timed out" failures on slower models — Nemotron 3 Ultra measured ~3
+    tokens/sec, 50-65s for a full response, right up against a 60s timeout
+    even with zero queue delay.
+
+    Errors arrive two ways: as an HTTP status before any tokens (raised by
+    the SDK as APIStatusError), or as an error object inside the stream after
+    the 200 is already committed. Both go through dispatch_error(), so the
+    retry/stop/fatal behaviour is identical either way.
+
+    Pass `client` to send this call through a different gateway — see
+    make_client(). Defaults to the module-level client (LLM_ROUTER, or
+    OpenRouter).
+
+    Returns the response text, or None once the attempts are spent. Raises
+    FatalAPIError for problems no retry will fix.
+    """
+    if client is None:
+        client = globals()["client"]
+    extra_body = {
+        # Makes OpenRouter append a usage object to the final chunk,
+        # including is_byok — see record_usage().
+        "usage": {"include": True},
+    }
+    if REASONING_ENABLED:
+        extra_body["reasoning"] = {"enabled": True}
+
     for attempt in range(retries + 1):
         try:
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=OPENROUTER_HEADERS,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": True,
-                },
-                stream=True,
-                timeout=60,
+            _throttle()
+            stream = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                stream=STREAMING,
+                extra_body=extra_body,
             )
-        except requests.exceptions.RequestException as e:
-            print(f"  Attempt {attempt + 1} failed ({model}): network error: {e}")
-            time.sleep(2 ** (attempt + 1))
-            continue
 
-        # Pre-stream error: request rejected outright, before any tokens.
-        if resp.status_code >= 400:
-            try:
-                data = resp.json()
-                error = data.get("error") or {"code": resp.status_code, "message": resp.text[:200], "metadata": {}}
-            except ValueError:
-                error = {"code": resp.status_code, "message": resp.text[:200], "metadata": {}}
-            outcome = dispatch_error(error, resp, model, attempt)
-            if outcome == "retry":
-                continue
-            return None  # "stop"
+            if not STREAMING:
+                record_usage(model, _usage_dict(stream))
+                return stream.choices[0].message.content
 
-        content_parts = []
-        mid_stream_error = None
-        stream_broke = False
-        try:
-            for line in resp.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data: "):
-                    continue
-                payload = line[len("data: "):].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
+            content_parts = []
+            usage = None  # arrives on the final chunk, which carries no choices
+            mid_stream_error = None
 
-                error = extract_error(chunk)
+            for chunk in stream:
+                # OpenRouter can report a provider failure inside the stream
+                # after the 200 is already committed. The SDK keeps unknown
+                # fields in model_extra, so check there as well as in choices.
+                error = extract_error(_chunk_dict(chunk))
                 if error:
                     mid_stream_error = error
                     break
 
-                choices = chunk.get("choices") or []
-                if choices:
-                    delta = choices[0].get("delta", {})
-                    content_parts.append(delta.get("content") or "")
-        except requests.exceptions.RequestException as e:
-            print(f"  Attempt {attempt + 1} failed ({model}) mid-stream: {e}")
-            stream_broke = True
+                if getattr(chunk, "usage", None):
+                    usage = _usage_dict(chunk)
 
-        if stream_broke:
+                if chunk.choices:
+                    content_parts.append(chunk.choices[0].delta.content or "")
+
+            if mid_stream_error:
+                outcome = dispatch_error(mid_stream_error, None, None, model, attempt)
+                if outcome == "retry":
+                    continue
+                return None  # "stop"
+
+            record_usage(model, usage)
+            return "".join(content_parts)
+
+        except (APIConnectionError, APITimeoutError) as e:
+            print(f"  Attempt {attempt + 1} failed ({model}): network error: {e}")
             time.sleep(2 ** (attempt + 1))
-            continue
 
-        if mid_stream_error:
-            outcome = dispatch_error(mid_stream_error, resp, model, attempt)
+        except APIStatusError as e:
+            body = e.body if isinstance(e.body, dict) else {}
+            error = body.get("error") if isinstance(body.get("error"), dict) else None
+            if error is None:
+                error = {"code": e.status_code, "message": str(e)[:200], "metadata": {}}
+            retry_after = None
+            if getattr(e, "response", None) is not None:
+                retry_after = e.response.headers.get("Retry-After")
+
+            outcome = dispatch_error(error, e.status_code, retry_after, model, attempt)
             if outcome == "retry":
                 continue
             return None  # "stop"
-
-        return "".join(content_parts)
 
     return None
 
