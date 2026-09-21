@@ -39,7 +39,7 @@ import matcher  # reuse build_classifier_prompt, build_prompt, call_model,
 # to call_model() to address the earlier read-timeout issue on this model.
 # Overridable, because a router swap usually needs a model swap too — model
 # slugs aren't portable between gateways.
-#   BENCHMARK_SCORER=deepseek/deepseek-v4-flash-free BENCHMARK_ROUTER=orcarouter ...
+#   BENCHMARK_SCORER=meta-llama/llama-4-70b BENCHMARK_ROUTER=<name> ...
 BENCHMARK_CLASSIFIER_MODEL = os.environ.get("BENCHMARK_CLASSIFIER", "inclusionai/ling-3.0-flash-vl:free")
 BENCHMARK_SCORER_MODEL = os.environ.get("BENCHMARK_SCORER", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
@@ -75,8 +75,8 @@ OUTPUT_PATH = os.path.join(
 
 
 # Which gateway this benchmark runs against. Either a name from
-# matcher.ROUTERS (openrouter, orcarouter) or an explicit URL:
-#   BENCHMARK_ROUTER=orcarouter    python3 scripts/comparison_benchmark.py
+# matcher.ROUTERS, or an explicit URL:
+#   BENCHMARK_ROUTER=openrouter    python3 scripts/comparison_benchmark.py
 #   BENCHMARK_BASE_URL=https://... python3 scripts/comparison_benchmark.py
 # Lets the same 100 jobs and the same prompts be replayed across routers.
 BENCHMARK_ROUTER = os.environ.get("BENCHMARK_ROUTER", matcher.DEFAULT_ROUTER).strip().lower()

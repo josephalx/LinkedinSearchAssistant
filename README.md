@@ -31,7 +31,7 @@ scripts/scrapper_playwright.py  (Playwright, headless — dashboard default)
 - **`scripts/scrapper.py`** — Selenium scrapes LinkedIn's public (logged-out) job search, stores parsed postings in the `jobs` table.
 - **`scripts/scrapper_playwright.py`** — a Playwright port of the scraper: same selectors, same DB writes, same dedupe hand-off. Runs headless, blocks images/fonts/CSS, and adds env knobs for capping a run. This is what the dashboard launches by default.
 - **`scripts/dedupe_agent.py`** — runs automatically at the end of every scrape (either engine): finds jobs sharing a normalized (title, company) but with different JD text, and asks an LLM whether they're the same posting. Duplicates are removed before scoring; distinct ones are flagged so they're never re-examined. Can also be run on its own: `python3 scripts/dedupe_agent.py`.
-- **`scripts/matcher.py`** — classifies each job (mobile vs. software engineering) and scores it against the matching resume via OpenRouter, storing results in `matches`.
+- **`scripts/matcher.py`** — classifies each job (mobile vs. software engineering) and scores it against the matching resume, storing results in `matches`. Also the single place any LLM call is made: `call_model()` uses the OpenAI SDK against a configurable gateway, so `dedupe_agent.py` and `comparison_benchmark.py` inherit its retries, error handling and pacing. See [section 10](#10-llm-gateways-routers).
 - **`data/db.py`** — all Postgres connection/schema logic. **This is where DB credentials live.**
 - **`data/notion.py`** — pushes a job into your Notion job-tracker database. Reads the database's real property schema first and shapes the payload to match, so it works whether a column came through the CSV import as Text or Select.
 - **`dashboard/api.py`** — a local Flask API: serves match data to the dashboard, triggers/stops the scraper and matcher with live log streaming over WebSocket, and exposes `POST /api/matches/<job_id>/add-to-notion`.
@@ -42,6 +42,7 @@ scripts/scrapper_playwright.py  (Playwright, headless — dashboard default)
 - **`data/`** — the data-access layer (`db.py` for Postgres, `notion.py` for the Notion API); every script puts it on `sys.path` before importing from it.
 - **`start_api.sh` / `start_api.bat`** — start the API server, in dry-run or prod mode.
 - **`scripts/export_matches.py`** — writes the top 10 highest-scoring, not-yet-applied matches to `results/matches_export.json` — a quick shortlist of what to apply to next, and the input `comparison_benchmark.py` replays.
+- **`scripts/comparison_benchmark.py`** — replays a fixed set of already-scored jobs through different models/gateways and writes a side-by-side old-vs-new comparison. Never touches `matches`; results go to the separate `match_benchmark` table. See [section 11](#11-benchmarking-models).
 - **`results/`** — exported match data. **`benchmarks_results/`** — `comparison_benchmark.py`'s side-by-side model dumps.
 
 ## 1. Prerequisites
@@ -55,7 +56,7 @@ scripts/scrapper_playwright.py  (Playwright, headless — dashboard default)
 From the project root, ideally inside a virtual environment (`.venv`):
 
 ```bash
-pip install selenium psycopg2-binary requests python-docx keyring flask flask-cors flask-socketio playwright
+pip install selenium psycopg2-binary requests python-docx keyring flask flask-cors flask-socketio playwright openai
 python3 -m playwright install chromium
 ```
 
@@ -102,6 +103,7 @@ python3 -c "import keyring; keyring.set_password('linkedin', 'password', 'your_p
 # OpenRouter API key (required — used by matcher.py for scoring, and by
 # dedupe_agent.py for duplicate judgments)
 python3 -c "import keyring; keyring.set_password('openrouter', 'api_key', 'your_openrouter_key')"
+
 
 # Dashboard token (required for the dashboard's run/stop trigger endpoints)
 python3 -c "import keyring; keyring.set_password('linkedinbot', 'dashboard_token', 'pick-a-long-random-string')"
@@ -304,6 +306,111 @@ SCRAPER_DRY_RUN=1 SCRAPER_MAX_PAGES=1 SCRAPER_MAX_JOBS=10 \
 In headed mode the pages render unstyled, because stylesheets are blocked —
 that's expected, not a bug. Comment out the `context.route(...)` call in
 `init_browser()` if you want it to look normal while watching.
+
+## 10. LLM gateways (routers)
+
+Every model call in the project goes through one function —
+`matcher.call_model()` — which talks to an **OpenAI-compatible** gateway via
+the `openai` SDK. Anything speaking that API works; one is pre-registered in
+`matcher.ROUTERS`:
+
+| Name | Base URL | Key looked up as |
+| --- | --- | --- |
+| `openrouter` (default) | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY`, then keyring `('openrouter', 'api_key')` |
+
+`env_key` in that registry is the **name** of an environment variable, not a
+value — no key is ever written into the source. Resolution order per router is
+env var -> keyring (`api_key`, then `api_key_backup`) -> generic `LLM_API_KEY`.
+
+Adding a third gateway is one entry in `ROUTERS`. To use one ad hoc without
+registering it, set `LLM_BASE_URL` and `LLM_API_KEY`.
+
+### Environment variables
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `LLM_ROUTER` | `openrouter` | Which registered router everything uses |
+| `LLM_BASE_URL` | — | Explicit gateway URL, bypassing the registry |
+| `LLM_API_KEY` | — | Generic key, used when a router-specific one isn't found |
+| `LLM_RPM` | `0` (off) | Requests-per-minute ceiling |
+| `LLM_TIMEOUT` | `60` | Per-request timeout, seconds |
+| `MATCHER_STREAM` | `1` | Stream responses |
+| `MATCHER_REASONING` | off | Send `reasoning: {enabled: true}` |
+
+**`LLM_RPM` paces per *request*, not per job.** Scoring one job costs two
+calls (classify + score), so a per-job sleep still lets those two fire back to
+back and trip a low limit. At `LLM_RPM=15` that's 4s between calls, ~8s per
+job, ~15 minutes for 100 jobs.
+
+**Streaming is on by default and worth keeping.** Tokens arriving incrementally
+reset the read-timeout clock — without it, slow models (one measured ~3
+tokens/sec, 50-65s for a full response) time out against the 60s limit.
+
+**Reasoning is opt-in** because it changes both output and cost; enabling it
+mid-benchmark would make runs non-comparable.
+
+## 11. Benchmarking models
+
+`comparison_benchmark.py` replays a fixed set of already-scored jobs through a
+different model or gateway and writes an old-score-vs-new-score comparison. It
+uses the **real production prompts** from `matcher.py`, so a result reflects
+what a real matcher run would have produced.
+
+It writes to the separate `match_benchmark` table — the live `matches` table
+and the pending queue are never touched.
+
+```bash
+# default: OpenRouter, models set in the file
+python3 scripts/comparison_benchmark.py
+
+# a different scorer, paced for a rate-limited account
+LLM_RPM=15 \
+BENCHMARK_SCORER=openai/gpt-oss-120b \
+  python3 scripts/comparison_benchmark.py
+
+# a gateway that isn't registered
+BENCHMARK_BASE_URL=https://my-gateway/v1 LLM_API_KEY=sk-... \
+  python3 scripts/comparison_benchmark.py
+
+# a smaller sample
+python3 scripts/comparison_benchmark.py path/to/subset.json
+```
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `BENCHMARK_ROUTER` | `LLM_ROUTER` | Gateway by registered name |
+| `BENCHMARK_BASE_URL` | — | Gateway by explicit URL |
+| `BENCHMARK_CLASSIFIER` | set at the top of the file | Classifier model |
+| `BENCHMARK_SCORER` | set at the top of the file | Scorer model |
+| `BENCHMARK_OUTPUT` | derived from the scorer | Output filename |
+
+### Input and output
+
+**Input** defaults to `benchmarks_results/matches_export.json` — deliberately
+*not* `results/matches_export.json`, which `export_matches.py` overwrites with
+a 10-job shortlist. Keeping them apart means a benchmark sample stays stable
+across runs instead of silently shrinking to 10 jobs.
+
+**Output** is named from the scorer, e.g. `qwen/qwen3.8-27b:free` ->
+`benchmarks_results/benchmark_comparison_qwen_qwen3.8-27b_free.json`. Slashes
+and colons fold to underscores, since neither is filename-safe. Naming it
+automatically stops one run clobbering another model's results — which has
+happened here before.
+
+Each record carries `gateway`, `classifier_model` and `scorer_model`, so
+results stay attributable when the same model is run through two gateways.
+
+### Retries
+
+A job whose scorer call fails every attempt isn't dropped. The run makes up to
+5 passes, re-attempting whatever is still missing — the same pattern
+`matcher.py` uses, since most failures are transient rate limiting that a later
+pass gets past. A pass that makes zero progress stops the loop rather than
+burning quota on something permanently broken, and the closing line names any
+job that never completed.
+
+Ctrl-C and a fatal API error both still write out whatever scored before the
+interruption.
 
 ## Notes
 

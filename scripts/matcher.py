@@ -44,19 +44,15 @@ import db
 # to find its key; add an entry here and it becomes usable by name everywhere
 # (matcher, dedupe_agent, both benchmarks).
 #
-# Pick one with LLM_ROUTER=orcarouter, or point somewhere unlisted with
-# LLM_BASE_URL=https://… (plus LLM_API_KEY). comparison_benchmark.py can also
-# pass a client straight to call_model(), so a single run can compare routers.
+# Pick a registered one with LLM_ROUTER=<name>, or point somewhere unlisted
+# with LLM_BASE_URL=https://… (plus LLM_API_KEY). comparison_benchmark.py can
+# also pass a client straight to call_model(), so a single run can compare
+# gateways without changing the default.
 ROUTERS = {
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
         "env_key": "OPENROUTER_API_KEY",
         "keyring": ("openrouter", "api_key"),
-    },
-    "orcarouter": {
-        "base_url": "https://api.orcarouter.ai/v1",
-        "env_key": "ORCAROUTER_API_KEY",
-        "keyring": ("orcarouter", "api_key"),
     },
 }
 
@@ -79,6 +75,11 @@ REASONING_ENABLED = os.environ.get("MATCHER_REASONING", "").lower() in ("1", "tr
 STREAMING = os.environ.get("MATCHER_STREAM", "1").lower() in ("1", "true", "yes")
 
 REQUEST_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "60"))
+
+# Longest a single retry will sleep. Gateways report a quota reset through
+# Retry-After too, and those values run to hours — honouring one verbatim
+# parks the run for most of a day. Anything above this is treated as fatal.
+MAX_BACKOFF = float(os.environ.get("LLM_MAX_BACKOFF", "120"))
 
 # Requests-per-minute ceiling, applied per REQUEST rather than per job. This
 # matters because scoring a job costs two calls (classify + score): a per-job
@@ -268,6 +269,18 @@ def dispatch_error(error, status, retry_after, model, attempt):
                 wait = float(retry_after)
             except (TypeError, ValueError):
                 pass
+
+        # A Retry-After measured in hours is a quota reset, not a transient
+        # limit — free tiers report the time until the daily window rolls
+        # over. Sleeping on it would silently park the run for most of a day,
+        # so stop instead and let the caller write out what it already has.
+        if wait > MAX_BACKOFF:
+            raise FatalAPIError(
+                f"{model}: rate limited for {wait:.0f}s (~{wait / 3600:.1f}h) — that's a "
+                f"quota reset, not a transient limit. Stopping instead of sleeping "
+                f"(raise LLM_MAX_BACKOFF above {MAX_BACKOFF:.0f} to wait anyway)."
+            )
+
         print(f"  {label} on {model}; waiting {wait}s before retry.")
         time.sleep(wait)
         return "retry"
