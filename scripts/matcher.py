@@ -30,7 +30,7 @@ import keyring
 
 from docx import Document
 from openai import OpenAI
-from openai import APIConnectionError, APIStatusError, APITimeoutError
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
 # db.py lives in data/, a sibling of scripts/
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -170,8 +170,8 @@ DRY_RUN = os.environ.get("MATCHER_DRY_RUN", "").lower() in ("1", "true", "yes")
 
 # Two models, two separate OpenRouter rate-limit pools — classification calls
 # don't eat into the scoring model's daily quota, and vice versa.
-CLASSIFIER_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
-SCORER_MODEL = "inclusionai/ling-3.0-flash-vl:free"
+CLASSIFIER_MODEL = "inclusionai/ling-3.0-flash-fin:free"
+SCORER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 RESUMES = {
     "software_engineering_v1": "/Users/joseph/Documents/Resume/Chakola_Joseph_Resume_Software_Engineering.docx",
@@ -298,8 +298,14 @@ def dispatch_error(error, status, retry_after, model, attempt):
     if error_type == "payment_required" or code == 402:
         raise FatalAPIError(f"{model}: out of credits (402). Add credits and rerun.")
 
-    if error_type == "authentication" or code in (401, 403):
-        raise FatalAPIError(f"{model}: invalid API key ({code}). Check OPENROUTER_API_KEY.")
+    if error_type == "authentication" or code == 401:
+        raise FatalAPIError(f"{model}: invalid API key (401). Check OPENROUTER_API_KEY.")
+
+    # 403 is not a bad key — the key authenticated, the request was refused.
+    # Free endpoints gated to "agentic harnesses" land here, and reporting
+    # them as an auth failure sends you looking in the wrong place entirely.
+    if code == 403:
+        raise FatalAPIError(f"{model}: forbidden (403) — {error.get('message')}")
 
     if (error_type in ("provider_overloaded", "provider_unavailable", "server", "timeout", "unmapped")
             or (isinstance(code, int) and code >= 500)):
@@ -467,6 +473,38 @@ def call_model(model, prompt, retries=2, client=None):
                 retry_after = e.response.headers.get("Retry-After")
 
             outcome = dispatch_error(error, e.status_code, retry_after, model, attempt)
+            if outcome == "retry":
+                continue
+            return None  # "stop"
+
+        except APIError as e:
+            # Base class, so this must come last — APIStatusError and the
+            # connection/timeout errors are all subclasses and are handled
+            # above with their own logic.
+            #
+            # The SDK raises a bare APIError for failures reported *inside* a
+            # stream, where there's no HTTP status to dispatch on: the
+            # provider already returned 200 and then gave up mid-response.
+            # Nvidia's "ResourceExhausted: Worker local total request limit
+            # reached (16/16)" arrives this way. Without this handler it
+            # escapes call_model entirely and kills the whole run — a
+            # 1000-job matcher pass dying on one job's capacity blip.
+            message = str(e)
+            error = {"code": None, "message": message[:300], "metadata": {}}
+
+            # Capacity and rate wording is worth retrying; anything else gets
+            # one pass through dispatch_error, which stops on non-retryables.
+            lowered = message.lower()
+            if any(marker in lowered for marker in
+                   ("resourceexhausted", "request limit", "rate limit",
+                    "overloaded", "capacity", "try again")):
+                wait = 2 ** (attempt + 1)
+                print(f"  Mid-stream capacity error from {model}; waiting {wait}s before retry.")
+                print(f"    {message[:160]}")
+                time.sleep(wait)
+                continue
+
+            outcome = dispatch_error(error, None, None, model, attempt)
             if outcome == "retry":
                 continue
             return None  # "stop"

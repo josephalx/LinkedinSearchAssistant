@@ -35,3 +35,7 @@ benchmarks_results/
 
 # Lock files from api.py's run/stop tracking — recreated automatically
 *.lock
+
+# Persisted LinkedIn browser profile — holds live session cookies (li_at),
+# which are equivalent to account access. Never commit this.
+mcp/linkedin/profile/
