@@ -170,7 +170,7 @@ DRY_RUN = os.environ.get("MATCHER_DRY_RUN", "").lower() in ("1", "true", "yes")
 
 # Two models, two separate OpenRouter rate-limit pools — classification calls
 # don't eat into the scoring model's daily quota, and vice versa.
-CLASSIFIER_MODEL = "inclusionai/ling-3.0-flash-fin:free"
+CLASSIFIER_MODEL = "nvidia/nemotron-3.5-lightning:free"
 SCORER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 RESUMES = {
@@ -207,6 +207,11 @@ Return ONLY one word, no punctuation, no explanation: mobile OR software_enginee
 
 
 def build_prompt(resume_text, jd_text):
+    # The years-of-experience rule is banded rather than left to judgement:
+    # asked only to "score low", models apply a seniority gap inconsistently,
+    # and a 3-year candidate was scoring 80+ against 8-year roles. Explicit
+    # caps make the penalty reproducible across models, which also keeps
+    # benchmark runs comparable.
     return f"""You are scoring how well a candidate's resume matches a job description.
 
 Resume:
@@ -214,6 +219,24 @@ Resume:
 
 Job Description:
 {jd_text}
+
+Scoring rules — apply the experience rule FIRST, before anything else:
+
+1. Work out the years of professional experience the job requires. Treat
+   "X+ years" as a minimum of X. If the job states no requirement, skip to
+   rule 3 and do not penalise.
+2. Work out the candidate's total years of professional experience from the
+   resume, then compare. The shortfall sets a HARD CAP on the score:
+     - 4 or more years short  -> score at most 25
+     - 2 to 3 years short     -> score at most 45
+     - about 1 year short     -> score at most 70
+     - meets or exceeds it    -> no cap from this rule
+   A strong skills match does NOT lift the score above the cap. Seniority
+   signals in the title (Staff, Principal, Lead, Senior) count as evidence
+   of the requirement when the text gives no explicit number.
+3. Within whatever cap applies, score the match on skills, domain and stack.
+
+State the required and actual years in `reasoning` whenever a cap applied.
 
 Return ONLY a JSON object, no markdown fences, no extra commentary, in exactly this shape:
 {{"score": <integer 0-100>, "missing_skills": "<comma-separated list>", "reasoning": "<1-2 sentence explanation>"}}

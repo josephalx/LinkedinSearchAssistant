@@ -36,7 +36,9 @@ import dedupe_agent  # same end-of-run cleanup the Selenium scraper triggers
 
 from urllib.parse import quote
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 # ---- Config ----
 LINKEDIN_EMAIL = keyring.get_password("linkedin", "email") or os.environ.get("LINKEDIN_EMAIL")
@@ -188,8 +190,16 @@ def extract_jd(page, job_url, label=""):
     page.goto(job_url, wait_until="domcontentloaded")
     random_delay(2, 4)
 
-    with open(os.path.join(PROJECT_ROOT, "last_job_debug.html"), "w", encoding="utf-8") as f:
-        f.write(page.content())
+    # Best-effort debug artifact. domcontentloaded fires before LinkedIn's
+    # client-side redirect settles, so page.content() can land mid-navigation
+    # and raise — and this file is only ever read when selectors need fixing.
+    # Losing it must not end a 3000-job run, which is exactly what happened
+    # on 2026-10-07 at job ~50.
+    try:
+        with open(os.path.join(PROJECT_ROOT, "last_job_debug.html"), "w", encoding="utf-8") as f:
+            f.write(page.content())
+    except Exception as e:
+        print(f"{label} (could not save debug HTML: {type(e).__name__})")
 
     def safe_text(selector):
         el = page.query_selector(selector)
@@ -258,8 +268,11 @@ def scrape_search_page(page, max_jobs=25, source_keyword=None, new_counts=None, 
                 print(f"{label} Parsed ({status}): {jd['title']} @ {jd['company']}")
             if progress is not None:
                 progress["done"] += 1
-        except PlaywrightTimeoutError as e:
-            print(f"{label} Skipped {url} due to error: {e}")
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            # PlaywrightError is the base class: navigation races, detached
+            # frames and closed targets all surface as it rather than as a
+            # timeout, and any one of them used to abort the whole run.
+            print(f"{label} Skipped {url} due to error: {type(e).__name__}: {str(e)[:120]}")
             if progress is not None:
                 progress["done"] += 1
             continue
