@@ -32,7 +32,8 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
 import db
 import matcher  # reuse build_classifier_prompt, build_prompt, call_model,
-                 # parse_json_response, requires_clearance, get_job_details,
+                 # parse_json_response, requires_clearance,
+                 # requires_no_sponsorship, get_job_details,
                  # load_all_resumes, FatalAPIError, DEFAULT_RESUME_VERSION
 
 # The two models being benchmarked — Ultra scorer, with streaming now applied
@@ -40,7 +41,7 @@ import matcher  # reuse build_classifier_prompt, build_prompt, call_model,
 # Overridable, because a router swap usually needs a model swap too — model
 # slugs aren't portable between gateways.
 #   BENCHMARK_SCORER=meta-llama/llama-4-70b BENCHMARK_ROUTER=<name> ...
-BENCHMARK_CLASSIFIER_MODEL = os.environ.get("BENCHMARK_CLASSIFIER", "inclusionai/ling-3.0-flash-vl:free")
+BENCHMARK_CLASSIFIER_MODEL = os.environ.get("BENCHMARK_CLASSIFIER", matcher.CLASSIFIER_MODEL)
 BENCHMARK_SCORER_MODEL = os.environ.get("BENCHMARK_SCORER", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -97,14 +98,15 @@ def classify_resume_type(jd_text):
 
 
 def score_job(resume_text, jd_text):
-    # Uses matcher.build_prompt() directly — the real production prompt,
-    # including the 5+ year experience cap rule.
+    # Uses matcher.build_prompt() directly — the real production prompt — and
+    # matcher.apply_experience_cap() for the cap, so benchmark scores are
+    # produced exactly the way production scores are.
     content = matcher.call_model(BENCHMARK_SCORER_MODEL, matcher.build_prompt(resume_text, jd_text), client=CLIENT)
     if content is None:
         return None
     try:
-        return matcher.parse_json_response(content)
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        return matcher.apply_experience_cap(matcher.parse_json_response(content))
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as e:
         print(f"  Failed to parse scorer response: {e}")
         return None
 
@@ -152,6 +154,14 @@ def main():
                 if matcher.requires_clearance(jd_text):
                     new_result = {"score": 0, "missing_skills": "N/A", "reasoning": "Excluded: requires security clearance / US citizenship."}
                     new_resume_version = "excluded_clearance"
+                    db.save_benchmark_match(job_id, new_result, new_resume_version, "n/a", "n/a")
+                    print(f"[{i}/{len(pending)}] [excluded] {title} @ {company}")
+                elif matcher.requires_no_sponsorship(jd_text):
+                    # Mirrors main()'s pre-filter so benchmark runs exclude the
+                    # same jobs production does — otherwise the two aren't
+                    # comparable on the set of jobs actually scored.
+                    new_result = {"score": 0, "missing_skills": "N/A", "reasoning": "Excluded: hard sponsorship/visa-status blocker (no sponsorship now or in the future, OPT/CPT not accepted, or ITAR citizenship requirement)."}
+                    new_resume_version = "excluded_sponsorship"
                     db.save_benchmark_match(job_id, new_result, new_resume_version, "n/a", "n/a")
                     print(f"[{i}/{len(pending)}] [excluded] {title} @ {company}")
                 else:

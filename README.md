@@ -104,6 +104,10 @@ python3 -c "import keyring; keyring.set_password('linkedin', 'password', 'your_p
 # dedupe_agent.py for duplicate judgments)
 python3 -c "import keyring; keyring.set_password('openrouter', 'api_key', 'your_openrouter_key')"
 
+# Optional second OpenRouter key. Runs switch to it automatically when the
+# first is out of credits or has hit its daily quota — see section 10.
+python3 -c "import keyring; keyring.set_password('openrouter', 'api_key_backup', 'your_second_key')"
+
 
 # Dashboard token (required for the dashboard's run/stop trigger endpoints)
 python3 -c "import keyring; keyring.set_password('linkedinbot', 'dashboard_token', 'pick-a-long-random-string')"
@@ -322,6 +326,36 @@ the `openai` SDK. Anything speaking that API works; one is pre-registered in
 value — no key is ever written into the source. Resolution order per router is
 env var -> keyring (`api_key`, then `api_key_backup`) -> generic `LLM_API_KEY`.
 
+### Key failover
+
+Those keys are a **pool**, not just a fallback for a missing primary. When the
+active key comes back spent, the run switches to the next one and retries the
+same call instead of stopping. Three errors count as spent:
+
+| Error | Why it's key-scoped |
+| --- | --- |
+| `402` out of credits | Another key has its own balance |
+| `401` rejected | The key itself is bad |
+| `429` with a multi-hour `Retry-After` | A daily quota reset, not a transient limit |
+
+`403` and anything OpenRouter marks non-retryable are **not** included: those
+are the endpoint refusing the request, and a second key gets refused the same
+way, so the run stops as before.
+
+Once rotated, the run stays on the new key — the spent one isn't retried on
+every later call. The pool is de-duplicated, so holding the same value in both
+the env var and the keyring doesn't produce a pointless second attempt. Add a
+second key with:
+
+```bash
+python3 -c "import keyring; keyring.set_password('openrouter', 'api_key_backup', 'your_second_key')"
+```
+
+Failover applies to the shared client only. `comparison_benchmark.py` passes
+its own client to `call_model()` and so keeps the old stop-on-fatal behaviour,
+because rotating the shared key underneath a caller that chose its own gateway
+would send the call somewhere it didn't ask for.
+
 Adding a third gateway is one entry in `ROUTERS`. To use one ad hoc without
 registering it, set `LLM_BASE_URL` and `LLM_API_KEY`.
 
@@ -334,6 +368,7 @@ registering it, set `LLM_BASE_URL` and `LLM_API_KEY`.
 | `LLM_API_KEY` | — | Generic key, used when a router-specific one isn't found |
 | `LLM_RPM` | `0` (off) | Requests-per-minute ceiling |
 | `LLM_TIMEOUT` | `60` | Per-request timeout, seconds |
+| `LLM_KEY_FAILOVER` | `1` (on) | Switch to the next configured key when one is spent |
 | `MATCHER_STREAM` | `1` | Stream responses |
 | `MATCHER_REASONING` | off | Send `reasoning: {enabled: true}` |
 
@@ -411,6 +446,42 @@ job that never completed.
 
 Ctrl-C and a fatal API error both still write out whatever scored before the
 interruption.
+
+## Pre-filters (excluded without scoring)
+
+`matcher.py` runs two regex checks on the JD *before* any API call. A match
+writes a score of 0 with a marker `resume_version` and skips both the
+classifier and scorer calls, so an excluded job costs nothing. Measured over
+the current 3,413-job corpus:
+
+| Check | `resume_version` | Jobs matched |
+| --- | --- | --- |
+| `requires_clearance()` | `excluded_clearance` | 304 (8.9%) |
+| `requires_no_sponsorship()` | `excluded_sponsorship` | 228 (6.7%) |
+
+Clearance is checked first, so the 34 jobs matching both are filed as
+clearance. Net, the sponsorship filter removes 194 extra jobs per full run —
+388 API calls saved.
+
+**The sponsorship check matches hard blockers only.** 15% of postings mention
+"sponsor" at all, and most of those are `company-sponsored affinity groups` or
+`sponsored for a clearance` — neither is a work-authorization restriction, so
+keying on the bare word would discard jobs wholesale. Only absolute phrasing
+counts: `without current or future visa sponsorship`, `does not provide
+immigration-related sponsorship`, `sponsorship is not available`, `will not
+sponsor`, OPT/CPT exclusions, and ITAR/export-control roles.
+
+Soft wording is deliberately **not** a blocker — `unable to sponsor at this
+time`, `sponsorship has not been confirmed`, `may be available on a
+case-by-case basis`. Those still get classified, scored and tailored normally,
+with the caveat noted. A hard phrase only counts when no softening qualifier
+appears within 160 characters, so `unable to provide sponsorship at this time`
+passes through while `unable to provide sponsorship for this role` is a
+blocker.
+
+Precision is favoured over recall throughout: a false positive here silently
+throws away a job you should have seen, which is far costlier than a false
+negative that merely spends two API calls.
 
 ## Notes
 
