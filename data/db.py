@@ -35,6 +35,7 @@ def init_db():
             jd_text TEXT,
             jd_hash TEXT,
             source_keyword TEXT,
+            location TEXT,
             scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -42,6 +43,11 @@ def init_db():
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_keyword TEXT")
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS jd_hash TEXT")
     cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dedup_checked BOOLEAN DEFAULT FALSE")
+    # The location the scraper searched, not the location parsed off the
+    # posting — it records which search produced the row. Existing rows stay
+    # NULL rather than being backfilled to "United States", since that would
+    # be asserting something never actually recorded.
+    cur.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS location TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_jd_hash ON jobs (jd_hash)")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS matches (
@@ -109,9 +115,10 @@ def insert_job(job: dict) -> bool:
             return False  # exact content duplicate, skip
 
         cur.execute(
-            """INSERT INTO jobs (job_id, title, company, url, jd_text, jd_hash, source_keyword)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (job["job_id"], job["title"], job["company"], job["url"], job["jd_text"], jd_hash, job.get("source_keyword")),
+            """INSERT INTO jobs (job_id, title, company, url, jd_text, jd_hash, source_keyword, location)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (job["job_id"], job["title"], job["company"], job["url"], job["jd_text"], jd_hash,
+             job.get("source_keyword"), job.get("location")),
         )
         conn.commit()
         return True

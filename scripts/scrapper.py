@@ -231,6 +231,9 @@ def scrape_search_page(driver, max_jobs=40, source_keyword=None, new_counts=None
         try:
             jd = extract_jd(driver, url)
             jd["source_keyword"] = source_keyword
+            # Records which search produced this row, so jobs scraped for
+            # different countries stay distinguishable in one database.
+            jd["location"] = SEARCH_LOCATION
             if jd["jd_text"] and jd["job_id"]:
                 if DRY_RUN:
                     status = "dry-run, not stored"
@@ -288,6 +291,13 @@ def main():
         print("=== DRY RUN: scraping normally, but nothing will be written to the DB ===")
     else:
         db.init_db()
+
+    print(f"=== Keywords: {', '.join(SEARCH_KEYWORDS)} ===")
+    # Stated up front so a log tells you what it scraped without having to
+    # know which env vars were set when it launched.
+    print(f"=== Location: {SEARCH_LOCATION} ===")
+    print(f"=== Posted within: last {SEARCH_DAYS_BACK} day(s) ===")
+
     driver = init_driver()
     interrupted = False
     try:

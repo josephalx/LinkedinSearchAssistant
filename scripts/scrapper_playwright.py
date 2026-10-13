@@ -264,6 +264,9 @@ def scrape_search_page(page, max_jobs=25, source_keyword=None, new_counts=None, 
         try:
             jd = extract_jd(page, url, label=label)
             jd["source_keyword"] = source_keyword
+            # Records which search produced this row, so jobs scraped for
+            # different countries stay distinguishable in one database.
+            jd["location"] = SEARCH_LOCATION
             if jd["jd_text"] and jd["job_id"]:
                 if DRY_RUN:
                     status = "dry-run, not stored"
@@ -290,6 +293,36 @@ def scrape_search_page(page, max_jobs=25, source_keyword=None, new_counts=None, 
     return results
 
 
+# Navigation gets longer than the 15s default used for element waits. The two
+# failures mean different things: a slow selector says the page is not what we
+# expected, while a slow navigation just says the network was slow — and
+# fetching India results from a US IP is routinely slower than the US feed.
+FEED_NAV_TIMEOUT_MS = int(os.environ.get("SCRAPER_NAV_TIMEOUT_MS", "30000"))
+
+# A timeout on one feed page is almost always transient, so retry before
+# abandoning the keyword. Capped low on purpose: if LinkedIn is throttling,
+# hammering it makes things worse.
+FEED_NAV_ATTEMPTS = 3
+
+
+def goto_feed_page(page, url, keyword, start):
+    """Navigate to one page of search results. Returns False once the attempts
+    are spent, so the caller can stop this keyword instead of the whole run —
+    an unguarded goto here previously killed a 3000-job run on page 7."""
+    for attempt in range(1, FEED_NAV_ATTEMPTS + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded",
+                      timeout=FEED_NAV_TIMEOUT_MS)
+            return True
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            print(f"[{keyword}] start={start}: navigation attempt "
+                  f"{attempt}/{FEED_NAV_ATTEMPTS} failed "
+                  f"({type(e).__name__}: {str(e).splitlines()[0][:90]})")
+            if attempt < FEED_NAV_ATTEMPTS:
+                time.sleep(5 * attempt)
+    return False
+
+
 def scrape_keyword(page, keyword, new_counts=None, progress=None):
     """Paginate through search results for a single keyword."""
     all_jobs = []
@@ -298,7 +331,10 @@ def scrape_keyword(page, keyword, new_counts=None, progress=None):
 
     while start < page_size * MAX_PAGES:
         url = build_search_url(keyword, SEARCH_LOCATION, start=start, days_back=SEARCH_DAYS_BACK)
-        page.goto(url, wait_until="domcontentloaded")
+        if not goto_feed_page(page, url, keyword, start):
+            print(f"[{keyword}] Could not load start={start} after "
+                  f"{FEED_NAV_ATTEMPTS} attempts; stopping this keyword.")
+            break
         random_delay(3, 5)
 
         if hit_authwall(page):
@@ -342,6 +378,10 @@ def main():
           f"x {per_page} job(s)/page = up to {max_jobs_total} jobs "
           f"({max_jobs_total // len(SEARCH_KEYWORDS)} per keyword) ===")
     print(f"=== Keywords: {', '.join(SEARCH_KEYWORDS)} ===")
+    # Stated up front so a log tells you what it scraped without having to
+    # know which env vars were set when it launched.
+    print(f"=== Location: {SEARCH_LOCATION} ===")
+    print(f"=== Posted within: last {SEARCH_DAYS_BACK} day(s) ===")
 
     started = time.time()
     interrupted = False
@@ -351,12 +391,30 @@ def main():
         try:
             all_jobs = []
             new_counts = {}  # source_keyword -> count of genuinely new DB inserts
+            failed_keywords = []
             for n, keyword in enumerate(SEARCH_KEYWORDS, start=1):
                 print(f"\n=== Searching ({n}/{len(SEARCH_KEYWORDS)}): {keyword} ===")
-                all_jobs.extend(
-                    scrape_keyword(page, keyword, new_counts=new_counts, progress=progress)
-                )
+                try:
+                    all_jobs.extend(
+                        scrape_keyword(page, keyword, new_counts=new_counts, progress=progress)
+                    )
+                except Interrupted:
+                    raise  # a stop request must still stop the run
+                except Exception as e:
+                    # One keyword failing must not cost the keywords after it.
+                    # Previously any error here ended the process: a single
+                    # feed-page timeout on keyword 1 lost keywords 2 and 3 and
+                    # turned a 3000-job run into 55 jobs. Deliberately broad —
+                    # the point is that nothing below this line can end the run.
+                    failed_keywords.append(keyword)
+                    print(f"[{keyword}] FAILED: {type(e).__name__}: "
+                          f"{str(e).splitlines()[0][:140]}")
+                    print(f"[{keyword}] Moving on to the next keyword.")
                 random_delay(8, 15)  # gap between keyword searches
+
+            if failed_keywords:
+                print(f"\n=== {len(failed_keywords)} keyword(s) failed: "
+                      f"{', '.join(failed_keywords)} ===")
 
             print(f"\nTotal parsed across all keywords: {len(all_jobs)} "
                   f"(of {progress['done']} attempted, ceiling was {max_jobs_total})")
