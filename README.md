@@ -418,16 +418,29 @@ python3 scripts/comparison_benchmark.py path/to/subset.json
 | `BENCHMARK_CLASSIFIER` | set at the top of the file | Classifier model |
 | `BENCHMARK_SCORER` | set at the top of the file | Scorer model |
 | `BENCHMARK_OUTPUT` | derived from the scorer | Output filename |
+| `BENCHMARK_DIR` | `benchmarks_results` | Folder holding both input and output |
 
 ### Input and output
 
-**Input** defaults to `benchmarks_results/matches_export.json` — deliberately
+**`BENCHMARK_DIR`** sets where both live, so a sweep's results can be kept
+apart from earlier ones:
+
+```bash
+BENCHMARK_DIR=benchmark_results_bedrock python3 scripts/comparison_benchmark.py
+```
+
+A relative value resolves against the project root; an absolute path is used
+as given. The folder is created before results are written, so it needn't
+exist first. Note it moves the *input* default too — pass the sample path as
+the first argument when the input lives elsewhere.
+
+**Input** defaults to `<BENCHMARK_DIR>/matches_export.json` — deliberately
 *not* `results/matches_export.json`, which `export_matches.py` overwrites with
 a 10-job shortlist. Keeping them apart means a benchmark sample stays stable
 across runs instead of silently shrinking to 10 jobs.
 
 **Output** is named from the scorer, e.g. `qwen/qwen3.8-27b:free` ->
-`benchmarks_results/benchmark_comparison_qwen_qwen3.8-27b_free.json`. Slashes
+`<BENCHMARK_DIR>/benchmark_comparison_qwen_qwen3.8-27b_free.json`. Slashes
 and colons fold to underscores, since neither is filename-safe. Naming it
 automatically stops one run clobbering another model's results — which has
 happened here before.

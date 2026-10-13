@@ -48,11 +48,46 @@ import db
 # with LLM_BASE_URL=https://… (plus LLM_API_KEY). comparison_benchmark.py can
 # also pass a client straight to call_model(), so a single run can compare
 # gateways without changing the default.
+# Bedrock's OpenAI-compatible endpoint is per-region, and a long-term Bedrock
+# API key only works in the region it was generated in — a key from elsewhere
+# fails with "Credential should be scoped to a valid region" even when the
+# model ID and URL are right. Set both together.
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1").strip()
+
 ROUTERS = {
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
         "env_key": "OPENROUTER_API_KEY",
         "keyring": ("openrouter", "api_key"),
+    },
+    # Amazon Bedrock speaks OpenAI Chat Completions, so it needs no adapter —
+    # only a bearer token. That token is a *Bedrock API key*, not an AWS access
+    # key: the OpenAI SDK sends "Authorization: Bearer …" and cannot do SigV4
+    # signing. Generate one in the Bedrock console under API keys, in the same
+    # region as AWS_REGION — long-term keys are region-scoped and one from
+    # elsewhere fails with "Credential should be scoped to a valid region".
+    #
+    # bedrock-runtime. The alternative is bedrock-mantle
+    # (https://bedrock-mantle.{region}.api.aws/v1), and the two are NOT
+    # interchangeable — model IDs differ between them:
+    #   qwen.qwen3-vl-235b-a22b            runtime only (mantle: 404)
+    #   qwen.qwen3-vl-235b-a22b-instruct   mantle only  (runtime: 400)
+    #   openai.gpt-oss-120b-1:0            runtime only (mantle: 404)
+    #   openai.gpt-oss-120b                mantle only  (runtime: 400)
+    # Re-verify every model ID after changing this URL.
+    #
+    # Two other differences worth knowing. Runtime inlines a model's reasoning
+    # into `content` where mantle keeps it in a separate field — see
+    # strip_reasoning(), which handles both. And client.models.list() works
+    # only on mantle, so there is no live catalogue from here.
+    #
+    # Mantle is also the way round an SCP: it is a separate service namespace,
+    # so a policy denying bedrock:CallWithBearerToken does not cover
+    # bedrock-mantle:CallWithBearerToken.
+    "bedrock": {
+        "base_url": f"https://bedrock-runtime.{AWS_REGION}.amazonaws.com/openai/v1",
+        "env_key": "AWS_BEARER_TOKEN_BEDROCK",
+        "keyring": ("bedrock", "api_key"),
     },
 }
 
@@ -228,8 +263,16 @@ DRY_RUN = os.environ.get("MATCHER_DRY_RUN", "").lower() in ("1", "true", "yes")
 
 # Two models, two separate OpenRouter rate-limit pools — classification calls
 # don't eat into the scoring model's daily quota, and vice versa.
-CLASSIFIER_MODEL = "nvidia/nemotron-3.5-lightning:free"
-SCORER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+#
+# Overridable, and they must be set whenever LLM_ROUTER changes: model IDs are
+# not portable between gateways, so pointing at Bedrock while these still hold
+# OpenRouter slugs fails on every job.
+#   LLM_ROUTER=bedrock \
+#   MATCHER_CLASSIFIER=mistral.mistral-large-3-675b-instruct \
+#   MATCHER_SCORER=mistral.mistral-large-3-675b-instruct \
+#   python3 scripts/matcher.py
+CLASSIFIER_MODEL = os.environ.get("MATCHER_CLASSIFIER", "nvidia/nemotron-3.5-lightning:free").strip()
+SCORER_MODEL = os.environ.get("MATCHER_SCORER", "nvidia/nemotron-3-ultra-550b-a55b:free").strip()
 
 RESUMES = {
     "software_engineering_v1": "/Users/joseph/Documents/Resume/Chakola_Joseph_Resume_Software_Engineering.docx",
@@ -353,10 +396,34 @@ def apply_experience_cap(result):
             "missing_skills": format_missing_skills(result.get("missing_skills"))}
 
 
+def strip_reasoning(content):
+    """Drop a model's inline chain-of-thought, keeping only the answer.
+
+    Reasoning models differ in where they put their thinking. Some return it
+    in a separate field the SDK never mixes into `content`; others inline it
+    and close with a marker — nvidia.nemotron-nano-9b-v2 emits ~140 tokens of
+    deliberation, then `</think>`, then the answer. Everything before the last
+    marker is thinking, not output.
+
+    This matters more than it looks for classification: the reasoning text
+    routinely mentions both "mobile" and "software" while weighing them up, so
+    a substring match over the unstripped reply picks whichever is checked
+    first and silently returns the wrong resume.
+    """
+    if not content:
+        return content
+    for marker in ("</think>", "</reasoning>"):
+        if marker in content:
+            content = content.rsplit(marker, 1)[1]
+    return content
+
+
 def parse_json_response(content):
     # response_format isn't enforced on the free tier, so strip markdown
-    # fences defensively before parsing.
-    cleaned = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.MULTILINE).strip()
+    # fences defensively before parsing — and any inline reasoning first,
+    # since json.loads() would otherwise choke on the prose before the object.
+    cleaned = re.sub(r"^```(?:json)?|```$", "",
+                     strip_reasoning(content).strip(), flags=re.MULTILINE).strip()
     return json.loads(cleaned)
 
 
@@ -754,7 +821,10 @@ def classify_resume_type(jd_text):
     content = call_model(CLASSIFIER_MODEL, build_classifier_prompt(jd_text))
     if content is None:
         return DEFAULT_RESUME_VERSION
-    normalized = content.strip().lower()
+    # Inline reasoning has to go before the substring checks below — see
+    # strip_reasoning(). Without it a thinking model's deliberation decides
+    # the resume instead of its answer.
+    normalized = strip_reasoning(content).strip().lower()
     if "mobile" in normalized:
         return "mobile_v1"
     if "software" in normalized:

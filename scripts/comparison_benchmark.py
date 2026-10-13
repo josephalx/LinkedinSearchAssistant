@@ -45,9 +45,18 @@ BENCHMARK_CLASSIFIER_MODEL = os.environ.get("BENCHMARK_CLASSIFIER", matcher.CLAS
 BENCHMARK_SCORER_MODEL = os.environ.get("BENCHMARK_SCORER", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BENCHMARKS_DIR = os.path.join(PROJECT_ROOT, "benchmarks_results")
 
-# Input and output both live in benchmarks_results/. Deliberately NOT
+# Where benchmark input and output live. Override per run so a sweep's results
+# land in their own folder instead of mixing with earlier ones:
+#   BENCHMARK_DIR=benchmark_results_bedrock ./run_sweep.sh
+# A relative value resolves against the project root; an absolute path is used
+# as given. The directory is created before the results are written, so it does
+# not have to exist beforehand.
+BENCHMARKS_DIR = os.environ.get("BENCHMARK_DIR", "benchmarks_results").strip()
+if not os.path.isabs(BENCHMARKS_DIR):
+    BENCHMARKS_DIR = os.path.join(PROJECT_ROOT, BENCHMARKS_DIR)
+
+# Input and output both live in BENCHMARKS_DIR. Deliberately NOT
 # results/matches_export.json: export_matches.py writes a 10-job "what to apply
 # to next" shortlist there, which would silently shrink every benchmark to 10
 # jobs. This is a separate, larger, stable sample so runs stay comparable

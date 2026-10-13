@@ -43,3 +43,6 @@ mcp/linkedin/profile/
 # Playwright MCP session artifacts — page snapshots, console logs, screenshots
 # written per browser session. Regenerated on every run.
 .playwright-mcp/
+
+# Per-gateway benchmark output
+benchmark_results_bedrock/
