@@ -48,8 +48,16 @@ if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
     print("Note: LinkedIn credentials not configured in keyring/env — not required for logged-out scraping, continuing anyway.")
 
 SEARCH_KEYWORDS = ["android engineer", "react native developer", "software engineer"]
-SEARCH_LOCATION = "United States"
-SEARCH_DAYS_BACK = 14  # only postings from the last N days
+# Location is passed to LinkedIn verbatim as the `location` query parameter,
+# so it accepts whatever the site's own search box accepts — a country, a
+# state, or a metro ("Boston, Massachusetts, United States"). Narrower values
+# return fewer but more relevant postings.
+SEARCH_LOCATION = os.environ.get("SCRAPER_LOCATION", "United States").strip()
+
+# Becomes LinkedIn's f_TPR=r<seconds> recency filter. Smaller is fresher and
+# faster; larger reaches further back but returns postings that are more
+# likely to have closed by the time they are scored.
+SEARCH_DAYS_BACK = int(os.environ.get("SCRAPER_DAYS_BACK", "14"))
 
 DRY_RUN = os.environ.get("SCRAPER_DRY_RUN", "").lower() in ("1", "true", "yes")
 HEADED = os.environ.get("SCRAPER_HEADED", "").lower() in ("1", "true", "yes")
