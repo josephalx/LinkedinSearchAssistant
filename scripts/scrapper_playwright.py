@@ -36,7 +36,9 @@ import dedupe_agent  # same end-of-run cleanup the Selenium scraper triggers
 
 from urllib.parse import quote
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 # ---- Config ----
 LINKEDIN_EMAIL = keyring.get_password("linkedin", "email") or os.environ.get("LINKEDIN_EMAIL")
@@ -46,8 +48,16 @@ if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
     print("Note: LinkedIn credentials not configured in keyring/env — not required for logged-out scraping, continuing anyway.")
 
 SEARCH_KEYWORDS = ["android engineer", "react native developer", "software engineer"]
-SEARCH_LOCATION = "United States"
-SEARCH_DAYS_BACK = 14  # only postings from the last N days
+# Location is passed to LinkedIn verbatim as the `location` query parameter,
+# so it accepts whatever the site's own search box accepts — a country, a
+# state, or a metro ("Boston, Massachusetts, United States"). Narrower values
+# return fewer but more relevant postings.
+SEARCH_LOCATION = os.environ.get("SCRAPER_LOCATION", "United States").strip()
+
+# Becomes LinkedIn's f_TPR=r<seconds> recency filter. Smaller is fresher and
+# faster; larger reaches further back but returns postings that are more
+# likely to have closed by the time they are scored.
+SEARCH_DAYS_BACK = int(os.environ.get("SCRAPER_DAYS_BACK", "14"))
 
 DRY_RUN = os.environ.get("SCRAPER_DRY_RUN", "").lower() in ("1", "true", "yes")
 HEADED = os.environ.get("SCRAPER_HEADED", "").lower() in ("1", "true", "yes")
@@ -57,6 +67,11 @@ MAX_PAGES = int(os.environ.get("SCRAPER_MAX_PAGES", "40"))
 MAX_JOBS_PER_PAGE = int(os.environ.get("SCRAPER_MAX_JOBS", "25"))
 if os.environ.get("SCRAPER_KEYWORDS"):
     SEARCH_KEYWORDS = [k.strip() for k in os.environ["SCRAPER_KEYWORDS"].split(",") if k.strip()]
+
+# LinkedIn's guest search endpoint returns this many jobs per request. It is
+# NOT configurable — asking for more just returns 10 — and `start` must advance
+# by it, or the jobs in between are silently skipped.
+FEED_PAGE_SIZE = 10
 
 # Resource types the parser never looks at.
 BLOCKED_RESOURCES = {"image", "font", "media", "stylesheet"}
@@ -175,13 +190,24 @@ def extract_job_id(url):
     return match.group(1) if match else None
 
 
-def extract_jd(page, job_url):
-    """Visit a job's URL directly and pull title/company/JD text."""
+def extract_jd(page, job_url, label=""):
+    """Visit a job's URL directly and pull title/company/JD text.
+
+    `label` is the "[3/25]" progress marker printed ahead of the result.
+    """
     page.goto(job_url, wait_until="domcontentloaded")
     random_delay(2, 4)
 
-    with open(os.path.join(PROJECT_ROOT, "last_job_debug.html"), "w", encoding="utf-8") as f:
-        f.write(page.content())
+    # Best-effort debug artifact. domcontentloaded fires before LinkedIn's
+    # client-side redirect settles, so page.content() can land mid-navigation
+    # and raise — and this file is only ever read when selectors need fixing.
+    # Losing it must not end a 3000-job run, which is exactly what happened
+    # on 2026-10-07 at job ~50.
+    try:
+        with open(os.path.join(PROJECT_ROOT, "last_job_debug.html"), "w", encoding="utf-8") as f:
+            f.write(page.content())
+    except Exception as e:
+        print(f"{label} (could not save debug HTML: {type(e).__name__})")
 
     def safe_text(selector):
         el = page.query_selector(selector)
@@ -196,7 +222,7 @@ def extract_jd(page, job_url):
     company = safe_text("a.topcard__org-name-link")
     jd_text = safe_text("div.show-more-less-html__markup")
 
-    print(f"  -> title={title!r} company={company!r} jd_len={len(jd_text) if jd_text else 0}")
+    print(f"{label} title={title!r} company={company!r} jd_len={len(jd_text) if jd_text else 0}")
 
     return {
         "job_id": extract_job_id(job_url),
@@ -207,7 +233,7 @@ def extract_jd(page, job_url):
     }
 
 
-def scrape_search_page(page, max_jobs=25, source_keyword=None, new_counts=None):
+def scrape_search_page(page, max_jobs=25, source_keyword=None, new_counts=None, progress=None):
     cards = get_job_cards(page)
 
     # Collect URLs first — visiting a job page detaches the card handles.
@@ -221,11 +247,26 @@ def scrape_search_page(page, max_jobs=25, source_keyword=None, new_counts=None):
         if url:
             job_urls.append(url)
 
+    # How far `start` should advance: the feed's real page size, not an
+    # assumed one. LinkedIn's guest endpoint returns 10 per request, and
+    # stepping by more than that silently skips the jobs in between.
+    if progress is not None:
+        progress["last_cards"] = len(cards)
+
+    total_on_page = len(job_urls)
+    done_before = progress["done"] if progress else 0
+    print(f"--- {source_keyword}: {total_on_page} job(s) on this page "
+          f"({len(cards)} card(s) seen, {done_before} job(s) done so far) ---")
+
     results = []
-    for url in job_urls:
+    for i, url in enumerate(job_urls, start=1):
+        label = f"[{i}/{total_on_page}]"
         try:
-            jd = extract_jd(page, url)
+            jd = extract_jd(page, url, label=label)
             jd["source_keyword"] = source_keyword
+            # Records which search produced this row, so jobs scraped for
+            # different countries stay distinguishable in one database.
+            jd["location"] = SEARCH_LOCATION
             if jd["jd_text"] and jd["job_id"]:
                 if DRY_RUN:
                     status = "dry-run, not stored"
@@ -235,9 +276,16 @@ def scrape_search_page(page, max_jobs=25, source_keyword=None, new_counts=None):
                     if inserted and new_counts is not None:
                         new_counts[source_keyword] = new_counts.get(source_keyword, 0) + 1
                 results.append(jd)
-                print(f"Parsed ({status}): {jd['title']} @ {jd['company']}")
-        except PlaywrightTimeoutError as e:
-            print(f"Skipped {url} due to error: {e}")
+                print(f"{label} Parsed ({status}): {jd['title']} @ {jd['company']}")
+            if progress is not None:
+                progress["done"] += 1
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            # PlaywrightError is the base class: navigation races, detached
+            # frames and closed targets all surface as it rather than as a
+            # timeout, and any one of them used to abort the whole run.
+            print(f"{label} Skipped {url} due to error: {type(e).__name__}: {str(e)[:120]}")
+            if progress is not None:
+                progress["done"] += 1
             continue
 
         random_delay(3, 7)  # jittered gap between jobs
@@ -245,15 +293,48 @@ def scrape_search_page(page, max_jobs=25, source_keyword=None, new_counts=None):
     return results
 
 
-def scrape_keyword(page, keyword, new_counts=None):
+# Navigation gets longer than the 15s default used for element waits. The two
+# failures mean different things: a slow selector says the page is not what we
+# expected, while a slow navigation just says the network was slow — and
+# fetching India results from a US IP is routinely slower than the US feed.
+FEED_NAV_TIMEOUT_MS = int(os.environ.get("SCRAPER_NAV_TIMEOUT_MS", "30000"))
+
+# A timeout on one feed page is almost always transient, so retry before
+# abandoning the keyword. Capped low on purpose: if LinkedIn is throttling,
+# hammering it makes things worse.
+FEED_NAV_ATTEMPTS = 3
+
+
+def goto_feed_page(page, url, keyword, start):
+    """Navigate to one page of search results. Returns False once the attempts
+    are spent, so the caller can stop this keyword instead of the whole run —
+    an unguarded goto here previously killed a 3000-job run on page 7."""
+    for attempt in range(1, FEED_NAV_ATTEMPTS + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded",
+                      timeout=FEED_NAV_TIMEOUT_MS)
+            return True
+        except (PlaywrightTimeoutError, PlaywrightError) as e:
+            print(f"[{keyword}] start={start}: navigation attempt "
+                  f"{attempt}/{FEED_NAV_ATTEMPTS} failed "
+                  f"({type(e).__name__}: {str(e).splitlines()[0][:90]})")
+            if attempt < FEED_NAV_ATTEMPTS:
+                time.sleep(5 * attempt)
+    return False
+
+
+def scrape_keyword(page, keyword, new_counts=None, progress=None):
     """Paginate through search results for a single keyword."""
     all_jobs = []
-    page_size = 25
+    page_size = FEED_PAGE_SIZE
     start = 0
 
     while start < page_size * MAX_PAGES:
         url = build_search_url(keyword, SEARCH_LOCATION, start=start, days_back=SEARCH_DAYS_BACK)
-        page.goto(url, wait_until="domcontentloaded")
+        if not goto_feed_page(page, url, keyword, start):
+            print(f"[{keyword}] Could not load start={start} after "
+                  f"{FEED_NAV_ATTEMPTS} attempts; stopping this keyword.")
+            break
         random_delay(3, 5)
 
         if hit_authwall(page):
@@ -262,7 +343,8 @@ def scrape_keyword(page, keyword, new_counts=None):
 
         try:
             jobs = scrape_search_page(
-                page, max_jobs=MAX_JOBS_PER_PAGE, source_keyword=keyword, new_counts=new_counts
+                page, max_jobs=MAX_JOBS_PER_PAGE, source_keyword=keyword,
+                new_counts=new_counts, progress=progress,
             )
         except PlaywrightTimeoutError:
             print(f"[{keyword}] No results found at start={start}; stopping.")
@@ -273,7 +355,9 @@ def scrape_keyword(page, keyword, new_counts=None):
             break
 
         all_jobs.extend(jobs)
-        start += page_size
+        # Advance by what the feed actually returned. Falls back to page_size
+        # if the count is missing, and never advances by 0 (that would loop).
+        start += (progress or {}).get("last_cards") or page_size
         random_delay(5, 10)  # gap between pages, not just between jobs
 
     return all_jobs
@@ -285,19 +369,55 @@ def main():
     else:
         db.init_db()
 
+    # Up-front ceiling so the log says how big this run can get. It's an upper
+    # bound, not a prediction — pagination stops early at the auth wall or when
+    # a page returns nothing.
+    per_page = min(MAX_JOBS_PER_PAGE, FEED_PAGE_SIZE)
+    max_jobs_total = len(SEARCH_KEYWORDS) * MAX_PAGES * per_page
+    print(f"=== Plan: {len(SEARCH_KEYWORDS)} keyword(s) x up to {MAX_PAGES} page(s) "
+          f"x {per_page} job(s)/page = up to {max_jobs_total} jobs "
+          f"({max_jobs_total // len(SEARCH_KEYWORDS)} per keyword) ===")
+    print(f"=== Keywords: {', '.join(SEARCH_KEYWORDS)} ===")
+    # Stated up front so a log tells you what it scraped without having to
+    # know which env vars were set when it launched.
+    print(f"=== Location: {SEARCH_LOCATION} ===")
+    print(f"=== Posted within: last {SEARCH_DAYS_BACK} day(s) ===")
+
     started = time.time()
     interrupted = False
+    progress = {"done": 0}  # jobs attempted across the whole run
     with sync_playwright() as pw:
         browser, context, page = init_browser(pw)
         try:
             all_jobs = []
             new_counts = {}  # source_keyword -> count of genuinely new DB inserts
-            for keyword in SEARCH_KEYWORDS:
-                print(f"\n=== Searching: {keyword} ===")
-                all_jobs.extend(scrape_keyword(page, keyword, new_counts=new_counts))
+            failed_keywords = []
+            for n, keyword in enumerate(SEARCH_KEYWORDS, start=1):
+                print(f"\n=== Searching ({n}/{len(SEARCH_KEYWORDS)}): {keyword} ===")
+                try:
+                    all_jobs.extend(
+                        scrape_keyword(page, keyword, new_counts=new_counts, progress=progress)
+                    )
+                except Interrupted:
+                    raise  # a stop request must still stop the run
+                except Exception as e:
+                    # One keyword failing must not cost the keywords after it.
+                    # Previously any error here ended the process: a single
+                    # feed-page timeout on keyword 1 lost keywords 2 and 3 and
+                    # turned a 3000-job run into 55 jobs. Deliberately broad —
+                    # the point is that nothing below this line can end the run.
+                    failed_keywords.append(keyword)
+                    print(f"[{keyword}] FAILED: {type(e).__name__}: "
+                          f"{str(e).splitlines()[0][:140]}")
+                    print(f"[{keyword}] Moving on to the next keyword.")
                 random_delay(8, 15)  # gap between keyword searches
 
-            print(f"\nTotal parsed across all keywords: {len(all_jobs)}")
+            if failed_keywords:
+                print(f"\n=== {len(failed_keywords)} keyword(s) failed: "
+                      f"{', '.join(failed_keywords)} ===")
+
+            print(f"\nTotal parsed across all keywords: {len(all_jobs)} "
+                  f"(of {progress['done']} attempted, ceiling was {max_jobs_total})")
             for j in all_jobs:
                 print(j["job_id"], j["title"], j["company"], f"[{j.get('source_keyword')}]")
 

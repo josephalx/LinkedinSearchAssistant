@@ -112,6 +112,24 @@
     padding: 2px 10px;
   }
   .chip.pending-chip { color: var(--accent); border-color: var(--accent); }
+  /* Pill selects, matching dashboard.html. Extra right padding because the
+     native arrow sits inside the padding box and would otherwise touch the
+     rounded border. */
+  .run-select {
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 14px;
+    padding: 8px 22px 8px 16px;
+    border-radius: 999px;
+  }
+  .run-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .run-select:disabled { opacity: 0.5; }
+  .run-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px; color: var(--text-dim);
+  }
   .log-panel {
     display: none;
     font-family: 'IBM Plex Mono', monospace;
@@ -134,6 +152,7 @@
   .log-panel { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
   .log-header { color: var(--accent); font-weight: 500; }
   .log-ok { color: var(--good); }
+  .log-bad { color: var(--bad); }
   .log-warn { color: var(--mid); }
   .log-plain { color: var(--text-dim); }
   @media (max-width: 640px) {
@@ -156,6 +175,17 @@
     <div class="run-section">
       <button class="run-btn" id="scraper-run">Run scraper</button>
       <button class="run-btn stop-btn" id="scraper-stop" disabled>Stop</button>
+      <label class="run-label" for="scraper-location">location</label>
+      <select class="run-select" id="scraper-location">
+        <option value="United States">United States</option>
+        <option value="India">India</option>
+      </select>
+      <label class="run-label" for="scraper-days">posted within</label>
+      <select class="run-select" id="scraper-days">
+        <option value="7">7 days</option>
+        <option value="14" selected>14 days</option>
+        <option value="30">30 days</option>
+      </select>
       <span class="run-indicator" id="scraper-indicator"></span>
     </div>
     <pre class="log-panel" id="scraper-log"></pre>
@@ -190,9 +220,14 @@ function escapeHtml(s) {
 }
 
 function classifyLine(line) {
+  const scoreMatch = line.match(/^\[(\d+)%\]/);
+  if (scoreMatch) {
+    const score = parseInt(scoreMatch[1], 10);
+    return score >= 70 ? "log-ok" : "log-bad";
+  }
   if (/^===|^---/.test(line)) return "log-header";
   if (/skipped|error|failed|excluded/i.test(line)) return "log-warn";
-  if (/parsed \(|^\[\d/.test(line)) return "log-ok";
+  if (/parsed \(/.test(line)) return "log-ok";
   return "log-plain";
 }
 
@@ -205,6 +240,9 @@ function setupRunner(name, opts) {
   const indicator = document.getElementById(name + "-indicator");
   const logPanel = document.getElementById(name + "-log");
   const pendingChip = opts.pendingChipId ? document.getElementById(opts.pendingChipId) : null;
+  // Only the scraper has these; the matcher runner shares this function.
+  const locationSel = document.getElementById(name + "-location");
+  const daysSel = document.getElementById(name + "-days");
   let pendingCount = null;
 
   async function refreshPendingCount() {
@@ -258,11 +296,24 @@ function setupRunner(name, opts) {
   function setRunning(isRunning) {
     runBtn.disabled = isRunning;
     stopBtn.disabled = !isRunning;
+    // Locked during a run: the values are read once at launch, so leaving
+    // them editable would suggest a change applies to the run in progress.
+    if (locationSel) locationSel.disabled = isRunning;
+    if (daysSel) daysSel.disabled = isRunning;
     if (isRunning) {
       indicator.textContent = "running...";
       indicator.classList.add("active");
     }
   }
+
+  // Restore the previous choice, so a repeat run does not silently revert to
+  // the default country.
+  try {
+    const savedLoc = localStorage.getItem("scraper_location");
+    if (locationSel && savedLoc) locationSel.value = savedLoc;
+    const savedDays = localStorage.getItem("scraper_days");
+    if (daysSel && savedDays) daysSel.value = savedDays;
+  } catch (e) { /* ignore */ }
 
   socket.on(name + "_log", (data) => appendLog(data.line));
   socket.on(name + "_done", (data) => {
@@ -280,9 +331,18 @@ function setupRunner(name, opts) {
     setRunning(true);
     indicator.textContent = "starting...";
     try {
+      const body = {};
+      if (locationSel) body.location = locationSel.value;
+      if (daysSel) body.days_back = parseInt(daysSel.value, 10);
+      try {
+        if (locationSel) localStorage.setItem("scraper_location", locationSel.value);
+        if (daysSel) localStorage.setItem("scraper_days", daysSel.value);
+      } catch (e) { /* private mode — the selects just won't be remembered */ }
+
       const resp = await fetch(API_BASE + "/api/run-" + name, {
         method: "POST",
-        headers: { "X-API-Token": token },
+        headers: { "X-API-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       });
       if (resp.status === 401) {
         localStorage.removeItem("dashboard_token");

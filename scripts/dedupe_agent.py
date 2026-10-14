@@ -48,7 +48,7 @@ DRY_RUN = os.environ.get("SCRAPER_DRY_RUN", "").lower() in ("1", "true", "yes")
 # Reused from matcher.py: same OpenRouter call_model() (streaming, retries,
 # error handling). This is a simple same/different judgment call, well within
 # what a smaller/free model handles reliably.
-CLASSIFIER_MODEL = "inclusionai/ling-3.0-flash-fin:free"
+CLASSIFIER_MODEL = "nvidia/nemotron-3.5-lightning:free"
 
 
 def build_dedup_prompt(title, company, jd_a, jd_b):

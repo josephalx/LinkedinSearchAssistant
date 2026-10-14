@@ -61,13 +61,30 @@ if SCRAPER_ENGINE not in ("selenium", "playwright"):
     SCRAPER_ENGINE = "selenium"
 print(f"Scraper engine: {SCRAPER_ENGINE} ({os.path.basename(SCRAPER_SCRIPT)})")
 
-SCRAPER_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper_run.log")
-SCRAPER_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraper.lock")
+# Search pages per keyword for dashboard-triggered runs. At 10 jobs per page
+# this is 1000 jobs per keyword; the auth wall usually ends a run well before
+# that. Playwright-only — scrapper.py hardcodes 40 pages internally.
+SCRAPER_MAX_PAGES = int(os.environ.get("SCRAPER_MAX_PAGES", "100"))
+if SCRAPER_ENGINE == "playwright":
+    print(f"Scraper pages per keyword: {SCRAPER_MAX_PAGES} (~{SCRAPER_MAX_PAGES * 10} jobs/keyword ceiling)")
+
+# Run artifacts live OUTSIDE dashboard/, deliberately. The log is flushed on
+# every line while a scrape runs, and the lock file appears and disappears
+# around it — so when these sat next to dashboard.html and run.html, any file
+# watcher serving those pages (Live Preview, a browser extension, live-server)
+# saw the directory change hundreds of times and reloaded the open pages
+# mid-run. Nothing in the app reloads the pages; the churn in the served
+# folder did.
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+SCRAPER_LOG = os.path.join(LOG_DIR, "scraper_run.log")
+SCRAPER_LOCK_FILE = os.path.join(LOG_DIR, "scraper.lock")
 scraper_lock = threading.Lock()
 active_proc = {"proc": None}  # holds the running Popen so /api/stop-scraper can reach it
 
-MATCHER_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "matcher_run.log")
-MATCHER_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "matcher.lock")
+MATCHER_LOG = os.path.join(LOG_DIR, "matcher_run.log")
+MATCHER_LOCK_FILE = os.path.join(LOG_DIR, "matcher.lock")
 matcher_lock = threading.Lock()
 active_matcher_proc = {"proc": None}
 
@@ -107,7 +124,18 @@ clear_stale_lock_file(SCRAPER_LOCK_FILE)
 clear_stale_lock_file(MATCHER_LOCK_FILE)
 
 
-def run_scraper_background():
+# Allowlisted because these values become environment variables on a
+# subprocess: whatever arrives in the request body must be checked against a
+# known set rather than passed through. Adding a country is one entry here
+# plus one <option> in run.html.
+SCRAPER_LOCATIONS = ("United States", "India")
+SCRAPER_DAYS_CHOICES = (7, 14, 30)
+DEFAULT_SCRAPER_LOCATION = "United States"
+DEFAULT_SCRAPER_DAYS = 14
+
+
+def run_scraper_background(location=DEFAULT_SCRAPER_LOCATION,
+                           days_back=DEFAULT_SCRAPER_DAYS):
     """Runs scrapper.py as a subprocess, streaming each line to the log file
     and to any connected dashboard over the WebSocket in real time.
 
@@ -121,6 +149,14 @@ def run_scraper_background():
 
     env = dict(os.environ)
     env.setdefault("SCRAPER_DRY_RUN", "1")  # only fills in if start_api.sh didn't already set it
+    # The guest feed returns 10 jobs per request, so 100 pages = 1000 jobs per
+    # keyword. Only the Playwright scraper reads this; scrapper.py hardcodes its
+    # page count. setdefault, so an explicit env var still wins.
+    env.setdefault("SCRAPER_MAX_PAGES", str(SCRAPER_MAX_PAGES))
+    # Assigned, not setdefault: picking these in the UI is an explicit
+    # instruction and should override anything start_api.sh exported.
+    env["SCRAPER_LOCATION"] = location
+    env["SCRAPER_DAYS_BACK"] = str(days_back)
 
     with open(SCRAPER_LOG, "w") as log:
         proc = subprocess.Popen(
@@ -189,7 +225,8 @@ def get_matches():
     conn = db.get_connection()
     cur = conn.cursor()
     cur.execute("""
-        SELECT j.job_id, j.title, j.company, j.url, m.resume_version, m.score,
+        SELECT j.job_id, j.title, j.company, j.url, j.location,
+               m.resume_version, m.score,
                m.missing_skills, m.reasoning, m.applied, m.added_to_notion, m.scored_at
         FROM matches m
         JOIN jobs j ON j.job_id = m.job_id
@@ -254,11 +291,30 @@ def add_to_notion(job_id):
 @app.route("/api/run-scraper", methods=["POST"])
 @require_token
 def run_scraper():
+    payload = request.get_json(silent=True) or {}
+
+    location = payload.get("location", DEFAULT_SCRAPER_LOCATION)
+    if location not in SCRAPER_LOCATIONS:
+        return jsonify({"error": f"unsupported location: {location!r}"}), 400
+
+    days_back = payload.get("days_back", DEFAULT_SCRAPER_DAYS)
+    try:
+        days_back = int(days_back)
+    except (TypeError, ValueError):
+        return jsonify({"error": f"days_back must be a number, got {days_back!r}"}), 400
+    if days_back not in SCRAPER_DAYS_CHOICES:
+        return jsonify({"error": f"unsupported days_back: {days_back}"}), 400
+
     acquired = scraper_lock.acquire(blocking=False)
     if not acquired:
         return jsonify({"error": "scraper already running"}), 409
-    threading.Thread(target=run_scraper_background, daemon=True).start()
-    return jsonify({"status": "started", "dry_run": dry_run_enabled("SCRAPER_DRY_RUN")})
+    threading.Thread(target=run_scraper_background,
+                     kwargs={"location": location, "days_back": days_back},
+                     daemon=True).start()
+    return jsonify({"status": "started",
+                    "dry_run": dry_run_enabled("SCRAPER_DRY_RUN"),
+                    "location": location,
+                    "days_back": days_back})
 
 
 @app.route("/api/stop-scraper", methods=["POST"])

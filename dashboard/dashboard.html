@@ -175,6 +175,12 @@
   .score-bar { width: 3px; height: 18px; border-radius: 1px; flex-shrink: 0; }
   .score-num { font-family: 'IBM Plex Mono', monospace; font-weight: 500; }
   .company { color: var(--text-dim); }
+  .loc-tag {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    color: var(--text-dim); border: 1px solid var(--border-strong);
+    border-radius: 10px; padding: 1px 7px; margin-left: 6px;
+    white-space: nowrap;
+  }
   .resume-tag {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 13px; color: var(--text-faint);
@@ -348,6 +354,9 @@
       <option value="mobile_v1">Mobile</option>
       <option value="excluded_clearance">Excluded (clearance)</option>
     </select>
+    <select id="locationFilter">
+      <option value="all">All locations</option>
+    </select>
     <label class="show-applied"><input type="checkbox" id="showApplied" /> Show applied/discarded</label>
     <button class="refresh-btn" id="refreshBtn">Refresh</button>
   </div>
@@ -374,6 +383,10 @@
 <script>
 const API_URL = "http://josephs-macbook-pro.local:5050/api/matches";
 let DATA = [];
+// How many distinct locations the current data holds. Drives whether the
+// location filter and the per-row tag are shown at all — with one country
+// they are noise.
+let seenLocations = 1;
 let sortKey = "score";
 let sortDir = -1;
 // Keyed by job_id, not by row position — filters and sorts reshuffle the
@@ -399,6 +412,7 @@ async function loadData() {
     const resp = await fetch(API_URL);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     DATA = await resp.json();
+    populateLocationFilter();
     const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     document.getElementById("status").textContent = DATA.length + " matches loaded \u00b7 updated " + t;
     render();
@@ -408,14 +422,32 @@ async function loadData() {
   }
 }
 
+function populateLocationFilter() {
+  // United States is always offered, even before any US jobs are scraped, so
+  // the control never changes shape under you. Anything else is discovered
+  // from the data, so India appears on its own once those jobs land.
+  const sel = document.getElementById("locationFilter");
+  const current = sel.value;
+  const inData = DATA.map(d => d.location).filter(Boolean);
+  const options = [...new Set(["United States", ...inData])].sort();
+  // Drives the per-row tag: with a single location it would repeat the same
+  // value on every row and say nothing.
+  seenLocations = new Set(inData).size;
+  sel.innerHTML = '<option value="all">All locations</option>' +
+    options.map(l => '<option value="' + l + '">' + l + '</option>').join("");
+  sel.value = options.includes(current) || current === "all" ? current : "all";
+}
+
 function getFiltered() {
   const q = document.getElementById("search").value.toLowerCase();
   const resumeVal = document.getElementById("resumeFilter").value;
+  const locationVal = document.getElementById("locationFilter").value;
   const minScore = parseInt(document.getElementById("minScore").value, 10);
   const showApplied = document.getElementById("showApplied").checked;
   return DATA.filter(d => {
     if (!showApplied && d.applied) return false;
     if (resumeVal !== "all" && d.resume_version !== resumeVal) return false;
+    if (locationVal !== "all" && d.location !== locationVal) return false;
     if (d.score < minScore) return false;
     if (q && !(d.title.toLowerCase().includes(q) || d.company.toLowerCase().includes(q))) return false;
     return true;
@@ -492,7 +524,9 @@ function render() {
       '<td><div class="score-cell"><span class="score-bar" style="background:' + t.bar + '"></span>' +
       '<span class="score-num" style="color:' + t.text + '">' + d.score + '%</span></div></td>' +
       '<td>' + d.title + '</td>' +
-      '<td class="company">' + d.company + '</td>' +
+      '<td class="company">' + d.company +
+        (d.location && seenLocations > 1
+          ? ' <span class="loc-tag">' + d.location + '</span>' : '') + '</td>' +
       '<td><span class="resume-tag">' + resumeLabel(d.resume_version) + '</span></td>' +
       '</tr>';
     if (isOpen) {
@@ -606,6 +640,7 @@ function render() {
 
 document.getElementById("search").addEventListener("input", render);
 document.getElementById("resumeFilter").addEventListener("change", render);
+document.getElementById("locationFilter").addEventListener("change", render);
 document.getElementById("showApplied").addEventListener("change", render);
 document.getElementById("minScore").addEventListener("input", e => {
   document.getElementById("minScoreOut").textContent = e.target.value;

@@ -21,6 +21,7 @@ Output:
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -31,23 +32,70 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"))
 import db
 import matcher  # reuse build_classifier_prompt, build_prompt, call_model,
-                 # parse_json_response, requires_clearance, get_job_details,
+                 # parse_json_response, requires_clearance,
+                 # requires_no_sponsorship, get_job_details,
                  # load_all_resumes, FatalAPIError, DEFAULT_RESUME_VERSION
 
 # The two models being benchmarked — Ultra scorer, with streaming now applied
 # to call_model() to address the earlier read-timeout issue on this model.
-BENCHMARK_CLASSIFIER_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
-BENCHMARK_SCORER_MODEL = "inclusionai/ling-3.0-flash-vl:free"
+# Overridable, because a router swap usually needs a model swap too — model
+# slugs aren't portable between gateways.
+#   BENCHMARK_SCORER=meta-llama/llama-4-70b BENCHMARK_ROUTER=<name> ...
+BENCHMARK_CLASSIFIER_MODEL = os.environ.get("BENCHMARK_CLASSIFIER", matcher.CLASSIFIER_MODEL)
+BENCHMARK_SCORER_MODEL = os.environ.get("BENCHMARK_SCORER", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
-# Reads the export from results/; the comparison dump lands in benchmarks_results/.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_INPUT = os.path.join(PROJECT_ROOT, "results", "matches_export.json")
-BENCHMARKS_DIR = os.path.join(PROJECT_ROOT, "benchmarks_results")
-OUTPUT_PATH = os.path.join(BENCHMARKS_DIR, "benchmark_comparison_ling-vl.json")
+
+# Where benchmark input and output live. Override per run so a sweep's results
+# land in their own folder instead of mixing with earlier ones:
+#   BENCHMARK_DIR=benchmark_results_bedrock ./run_sweep.sh
+# A relative value resolves against the project root; an absolute path is used
+# as given. The directory is created before the results are written, so it does
+# not have to exist beforehand.
+BENCHMARKS_DIR = os.environ.get("BENCHMARK_DIR", "benchmarks_results").strip()
+if not os.path.isabs(BENCHMARKS_DIR):
+    BENCHMARKS_DIR = os.path.join(PROJECT_ROOT, BENCHMARKS_DIR)
+
+# Input and output both live in BENCHMARKS_DIR. Deliberately NOT
+# results/matches_export.json: export_matches.py writes a 10-job "what to apply
+# to next" shortlist there, which would silently shrink every benchmark to 10
+# jobs. This is a separate, larger, stable sample so runs stay comparable
+# across models.
+DEFAULT_INPUT = os.path.join(BENCHMARKS_DIR, "matches_export.json")
+
+def model_slug(model):
+    """Model id as a filename fragment.
+
+    Slugs carry characters a filename can't: "/" is a path separator and ":"
+    is trouble on some filesystems. Everything outside [A-Za-z0-9._-] folds
+    to an underscore, so openai/gpt-oss-120b -> openai_gpt-oss-120b and
+    inclusionai/ling-3.0-flash-vl:free -> inclusionai_ling-3.0-flash-vl_free.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", model).strip("_")
+
+
+# Derived from the scorer, so a run can't overwrite another model's results
+# just because someone forgot to rename the output. Still overridable:
+#   BENCHMARK_OUTPUT=benchmark_comparison_llama.json python3 scripts/comparison_benchmark.py
+OUTPUT_PATH = os.path.join(
+    BENCHMARKS_DIR,
+    os.environ.get("BENCHMARK_OUTPUT")
+    or f"benchmark_comparison_{model_slug(BENCHMARK_SCORER_MODEL)}.json",
+)
+
+
+# Which gateway this benchmark runs against. Either a name from
+# matcher.ROUTERS, or an explicit URL:
+#   BENCHMARK_ROUTER=openrouter    python3 scripts/comparison_benchmark.py
+#   BENCHMARK_BASE_URL=https://... python3 scripts/comparison_benchmark.py
+# Lets the same 100 jobs and the same prompts be replayed across routers.
+BENCHMARK_ROUTER = os.environ.get("BENCHMARK_ROUTER", matcher.DEFAULT_ROUTER).strip().lower()
+BENCHMARK_BASE_URL = os.environ.get("BENCHMARK_BASE_URL")
+CLIENT = matcher.make_client(base_url=BENCHMARK_BASE_URL, router=BENCHMARK_ROUTER)
 
 
 def classify_resume_type(jd_text):
-    content = matcher.call_model(BENCHMARK_CLASSIFIER_MODEL, matcher.build_classifier_prompt(jd_text))
+    content = matcher.call_model(BENCHMARK_CLASSIFIER_MODEL, matcher.build_classifier_prompt(jd_text), client=CLIENT)
     if content is None:
         return matcher.DEFAULT_RESUME_VERSION
     normalized = content.strip().lower()
@@ -59,14 +107,15 @@ def classify_resume_type(jd_text):
 
 
 def score_job(resume_text, jd_text):
-    # Uses matcher.build_prompt() directly — the real production prompt,
-    # including the 5+ year experience cap rule.
-    content = matcher.call_model(BENCHMARK_SCORER_MODEL, matcher.build_prompt(resume_text, jd_text))
+    # Uses matcher.build_prompt() directly — the real production prompt — and
+    # matcher.apply_experience_cap() for the cap, so benchmark scores are
+    # produced exactly the way production scores are.
+    content = matcher.call_model(BENCHMARK_SCORER_MODEL, matcher.build_prompt(resume_text, jd_text), client=CLIENT)
     if content is None:
         return None
     try:
-        return matcher.parse_json_response(content)
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        return matcher.apply_experience_cap(matcher.parse_json_response(content))
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as e:
         print(f"  Failed to parse scorer response: {e}")
         return None
 
@@ -80,62 +129,111 @@ def main():
         original_records = json.load(f)
 
     print(f"Loaded {len(original_records)} job records from {input_path}")
+    print(f"Router:     {BENCHMARK_ROUTER} ({CLIENT.base_url})")
     print(f"Classifier: {BENCHMARK_CLASSIFIER_MODEL}")
     print(f"Scorer:     {BENCHMARK_SCORER_MODEL}")
+    if matcher.RPM_LIMIT > 0:
+        print(f"Pacing:     {matcher.RPM_LIMIT:g} req/min "
+              f"(~{matcher.MIN_REQUEST_INTERVAL:.1f}s between calls, 2 calls/job)")
     print("Guardrails: ON (5+ year experience cap, clearance pre-filter)\n")
 
     resumes = matcher.load_all_resumes()
     comparison = []
 
+    # Multi-pass, mirroring matcher.py's main loop: a job that fails all of
+    # call_model()'s attempts is simply not added to seen_this_run, so the next
+    # pass picks it up again. Most failures are transient rate limiting, and a
+    # later pass lands after the window has moved on.
+    seen_this_run = set()
+    max_passes = 5
+
     try:
-        for i, old in enumerate(original_records, start=1):
-            job_id = old["job_id"]
-            title, company, jd_text = matcher.get_job_details(job_id)
+        for pass_num in range(1, max_passes + 1):
+            pending = [r for r in original_records if r["job_id"] not in seen_this_run]
+            if not pending:
+                break
 
-            if matcher.requires_clearance(jd_text):
-                new_result = {"score": 0, "missing_skills": "N/A", "reasoning": "Excluded: requires security clearance / US citizenship."}
-                new_resume_version = "excluded_clearance"
-                db.save_benchmark_match(job_id, new_result, new_resume_version, "n/a", "n/a")
-                print(f"[{i}/{len(original_records)}] [excluded] {title} @ {company}")
-            else:
-                new_resume_version = classify_resume_type(jd_text)
-                resume_text = resumes[new_resume_version]
-                new_result = score_job(resume_text, jd_text)
+            print(f"\n--- Pass {pass_num}: {len(pending)} job(s) pending ---")
+            progressed_this_pass = 0
 
-                if new_result is None:
-                    print(f"[{i}/{len(original_records)}] Skipping {job_id} ({title} @ {company}) after failed retries.")
-                    continue
+            for i, old in enumerate(pending, start=1):
+                job_id = old["job_id"]
+                title, company, jd_text = matcher.get_job_details(job_id)
 
-                db.save_benchmark_match(job_id, new_result, new_resume_version, BENCHMARK_CLASSIFIER_MODEL, BENCHMARK_SCORER_MODEL)
-                print(f"[{i}/{len(original_records)}] [{new_result.get('score')}%] {title} @ {company} ({new_resume_version}) — was {old.get('score')}%")
+                if matcher.requires_clearance(jd_text):
+                    new_result = {"score": 0, "missing_skills": "N/A", "reasoning": "Excluded: requires security clearance / US citizenship."}
+                    new_resume_version = "excluded_clearance"
+                    db.save_benchmark_match(job_id, new_result, new_resume_version, "n/a", "n/a")
+                    print(f"[{i}/{len(pending)}] [excluded] {title} @ {company}")
+                elif matcher.requires_no_sponsorship(jd_text):
+                    # Mirrors main()'s pre-filter so benchmark runs exclude the
+                    # same jobs production does — otherwise the two aren't
+                    # comparable on the set of jobs actually scored.
+                    new_result = {"score": 0, "missing_skills": "N/A", "reasoning": "Excluded: hard sponsorship/visa-status blocker (no sponsorship now or in the future, OPT/CPT not accepted, or ITAR citizenship requirement)."}
+                    new_resume_version = "excluded_sponsorship"
+                    db.save_benchmark_match(job_id, new_result, new_resume_version, "n/a", "n/a")
+                    print(f"[{i}/{len(pending)}] [excluded] {title} @ {company}")
+                else:
+                    new_resume_version = classify_resume_type(jd_text)
+                    resume_text = resumes[new_resume_version]
+                    new_result = score_job(resume_text, jd_text)
 
-            comparison.append({
-                "job_id": job_id,
-                "title": title,
-                "company": company,
-                "url": old.get("url"),
-                "old_resume_version": old.get("resume_version"),
-                "old_score": old.get("score"),
-                "old_missing_skills": old.get("missing_skills"),
-                "old_reasoning": old.get("reasoning"),
-                "new_resume_version": new_resume_version,
-                "new_score": new_result.get("score"),
-                "new_missing_skills": new_result.get("missing_skills"),
-                "new_reasoning": new_result.get("reasoning"),
-                "classifier_model": BENCHMARK_CLASSIFIER_MODEL,
-                "scorer_model": BENCHMARK_SCORER_MODEL,
-            })
+                    if new_result is None:
+                        print(f"[{i}/{len(pending)}] Skipping {job_id} ({title} @ {company}) "
+                              f"after failed retries — will retry next pass.")
+                        continue
 
-            time.sleep(random.uniform(2, 4))  # stay comfortably under rate limits
+                    db.save_benchmark_match(job_id, new_result, new_resume_version, BENCHMARK_CLASSIFIER_MODEL, BENCHMARK_SCORER_MODEL)
+                    print(f"[{i}/{len(pending)}] [{new_result.get('score')}%] {title} @ {company} ({new_resume_version}) — was {old.get('score')}%")
+
+                seen_this_run.add(job_id)
+                progressed_this_pass += 1
+
+                comparison.append({
+                    "job_id": job_id,
+                    "title": title,
+                    "company": company,
+                    "url": old.get("url"),
+                    "old_resume_version": old.get("resume_version"),
+                    "old_score": old.get("score"),
+                    "old_missing_skills": old.get("missing_skills"),
+                    "old_reasoning": old.get("reasoning"),
+                    "new_resume_version": new_resume_version,
+                    "new_score": new_result.get("score"),
+                    "new_missing_skills": new_result.get("missing_skills"),
+                    "new_reasoning": new_result.get("reasoning"),
+                    "classifier_model": BENCHMARK_CLASSIFIER_MODEL,
+                    "scorer_model": BENCHMARK_SCORER_MODEL,
+                    "gateway": str(CLIENT.base_url),
+                })
+
+                time.sleep(random.uniform(2, 4))  # stay comfortably under rate limits
+
+            if progressed_this_pass == 0:
+                # Every remaining job failed again this pass — the cause isn't
+                # transient, so looping further would just burn quota.
+                print("No progress made this pass — remaining jobs appear to be "
+                      "failing persistently. Stopping here rather than looping.")
+                break
 
     except matcher.FatalAPIError as e:
         print(f"\nStopping early — {e}")
+    except KeyboardInterrupt:
+        # Everything scored so far is already in `comparison`; fall through
+        # to the write rather than throwing the run away.
+        print("\nInterrupted — keeping whatever was scored so far.")
 
     os.makedirs(BENCHMARKS_DIR, exist_ok=True)
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump(comparison, f, indent=2, ensure_ascii=False)
 
-    print(f"\nDone. {len(comparison)} jobs compared. Written to {OUTPUT_PATH}")
+    print(f"\n{matcher.byok_summary()}")
+
+    unfinished = [r["job_id"] for r in original_records if r["job_id"] not in seen_this_run]
+    print(f"\nDone. {len(comparison)} of {len(original_records)} jobs compared. "
+          f"Written to {OUTPUT_PATH}")
+    if unfinished:
+        print(f"  {len(unfinished)} never completed: {', '.join(unfinished)}")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import random
+import signal
 import keyring
 
 # Debug dumps land in the project root, one level up from scripts/;
@@ -46,8 +47,16 @@ if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
     # needed again later.
     print("Note: LinkedIn credentials not configured in keyring/env — not required for logged-out scraping, continuing anyway.")
 SEARCH_KEYWORDS = ["android engineer", "react native developer", "software engineer"]
-SEARCH_LOCATION = "United States"
-SEARCH_DAYS_BACK = 14  # only postings from the last N days
+# Location is passed to LinkedIn verbatim as the `location` query parameter,
+# so it accepts whatever the site's own search box accepts — a country, a
+# state, or a metro ("Boston, Massachusetts, United States"). Narrower values
+# return fewer but more relevant postings.
+SEARCH_LOCATION = os.environ.get("SCRAPER_LOCATION", "United States").strip()
+
+# Becomes LinkedIn's f_TPR=r<seconds> recency filter. Smaller is fresher and
+# faster; larger reaches further back but returns postings that are more
+# likely to have closed by the time they are scored.
+SEARCH_DAYS_BACK = int(os.environ.get("SCRAPER_DAYS_BACK", "14"))
 
 # Dry-run mode: set SCRAPER_DRY_RUN=1 to scrape and print normally, but skip
 # every DB write (init_db and insert_job) — useful for demoing/testing a run
@@ -68,6 +77,25 @@ def init_driver():
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
     return driver
+
+
+class Interrupted(Exception):
+    """Raised when the dashboard's Stop button (or Ctrl-C) asks us to quit."""
+
+
+def _handle_stop(signum, frame):
+    raise Interrupted(f"signal {signum}")
+
+
+# The dashboard stops a run with SIGTERM to the whole process group
+# (api.py:stop_scraper). Python's default handler for SIGTERM terminates the
+# process immediately without unwinding, so driver.quit() and the dedupe
+# hand-off below never actually ran on a Stop click — the browser was left
+# orphaned and nothing got cleaned up. Turning the signal into a catchable
+# exception lets the finally block below run a real, ordered shutdown
+# instead (same fix as scrapper_playwright.py).
+signal.signal(signal.SIGTERM, _handle_stop)
+signal.signal(signal.SIGINT, _handle_stop)
 
 
 # Logged-out search removes account-ban risk entirely (no account to restrict),
@@ -203,6 +231,9 @@ def scrape_search_page(driver, max_jobs=40, source_keyword=None, new_counts=None
         try:
             jd = extract_jd(driver, url)
             jd["source_keyword"] = source_keyword
+            # Records which search produced this row, so jobs scraped for
+            # different countries stay distinguishable in one database.
+            jd["location"] = SEARCH_LOCATION
             if jd["jd_text"] and jd["job_id"]:
                 if DRY_RUN:
                     status = "dry-run, not stored"
@@ -260,7 +291,15 @@ def main():
         print("=== DRY RUN: scraping normally, but nothing will be written to the DB ===")
     else:
         db.init_db()
+
+    print(f"=== Keywords: {', '.join(SEARCH_KEYWORDS)} ===")
+    # Stated up front so a log tells you what it scraped without having to
+    # know which env vars were set when it launched.
+    print(f"=== Location: {SEARCH_LOCATION} ===")
+    print(f"=== Posted within: last {SEARCH_DAYS_BACK} day(s) ===")
+
     driver = init_driver()
+    interrupted = False
     try:
         all_jobs = []
         new_counts = {}  # source_keyword -> count of genuinely new DB inserts
@@ -280,13 +319,22 @@ def main():
         print(f"  TOTAL NEW: {total_new}")
 
         return all_jobs
+    except Interrupted:
+        interrupted = True
+        print("\n=== Stopped — closing the browser cleanly ===")
+        return []
     finally:
         driver.quit()
-        # Runs after the browser closes (pure DB + API calls from here) —
-        # always, every scraper run, whether triggered from the terminal or
-        # the dashboard. Uses the same SCRAPER_DRY_RUN flag as the rest of
-        # this script, so a dashboard dry-run never deletes anything either.
-        dedupe_agent.run_cleanup()
+        if interrupted:
+            # Matches scrapper_playwright.py's behaviour on Stop: skip firing
+            # dedup's LLM calls right after the user asked the run to stop.
+            print("=== Skipping dedup check (run was stopped early) ===")
+        else:
+            # Runs after the browser closes (pure DB + API calls from here) —
+            # on every completed run, whether triggered from the terminal or
+            # the dashboard. Uses the same SCRAPER_DRY_RUN flag as the rest of
+            # this script, so a dashboard dry-run never deletes anything either.
+            dedupe_agent.run_cleanup()
 
 
 if __name__ == "__main__":
