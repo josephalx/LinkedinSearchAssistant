@@ -24,7 +24,6 @@ import re
 import sys
 import json
 import time
-import random
 import keyring
 
 
@@ -48,6 +47,61 @@ import db
 # with LLM_BASE_URL=https://… (plus LLM_API_KEY). comparison_benchmark.py can
 # also pass a client straight to call_model(), so a single run can compare
 # gateways without changing the default.
+# ---------------------------------------------------------------------------
+# Gateway presets
+#
+# A router is chosen WITH its models, never alone: model IDs are not portable
+# between gateways, so pointing at Bedrock while the model names still hold
+# OpenRouter slugs fails on every job.
+#
+# These live here, not in dashboard/api.py, so changing a model is a matcher
+# edit that takes effect on the next run. matcher.py is launched as a fresh
+# subprocess each time, while api.py is loaded once at server start — putting
+# them there meant restarting the server to change a model.
+#
+# Selected with MATCHER_PRESET=<name>. An explicit LLM_ROUTER /
+# MATCHER_CLASSIFIER / MATCHER_SCORER / LLM_RPM still wins, so a terminal run
+# can override any single field without abandoning the preset.
+# ---------------------------------------------------------------------------
+MATCHER_PRESETS = {
+    "openrouter": {
+        "label": "OpenRouter",
+        "router": "openrouter",
+        "classifier": "nvidia/nemotron-3.5-lightning:free",
+        "scorer": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        # Free-tier models rate-limit, and LLM_RPM is the only brake since the
+        # per-job sleep was removed. Paced per REQUEST, and a job costs two,
+        # so 20 RPM is ~6s per job.
+        "rpm": "20",
+    },
+    "bedrock": {
+        "label": "Bedrock",
+        "router": "bedrock",
+        "classifier": "nvidia.nemotron-nano-9b-v2",
+        "scorer": "zai.glm-5",
+        # Unpaced: both calls measured ~3.6s, already only ~33 req/min.
+        "rpm": "0",
+    },
+}
+DEFAULT_MATCHER_PRESET = "openrouter"
+
+_preset_name = os.environ.get("MATCHER_PRESET", "").strip().lower()
+ACTIVE_PRESET = MATCHER_PRESETS.get(_preset_name)
+if _preset_name and ACTIVE_PRESET is None:
+    print(f"  Unknown MATCHER_PRESET {_preset_name!r}; "
+          f"known: {', '.join(MATCHER_PRESETS)}. Ignoring it.")
+
+
+def _setting(env_var, preset_key, fallback):
+    """Explicit environment variable, then the active preset, then the default."""
+    value = os.environ.get(env_var)
+    if value:
+        return value.strip()
+    if ACTIVE_PRESET:
+        return ACTIVE_PRESET[preset_key]
+    return fallback
+
+
 # Bedrock's OpenAI-compatible endpoint is per-region, and a long-term Bedrock
 # API key only works in the region it was generated in — a key from elsewhere
 # fails with "Credential should be scoped to a valid region" even when the
@@ -91,7 +145,7 @@ ROUTERS = {
     },
 }
 
-DEFAULT_ROUTER = os.environ.get("LLM_ROUTER", "openrouter").strip().lower()
+DEFAULT_ROUTER = _setting("LLM_ROUTER", "router", "openrouter").lower()
 
 # Optional attribution header — names this app in OpenRouter's activity view
 # and public app rankings. The documented header is "X-Title"; anything else
@@ -121,9 +175,12 @@ MAX_BACKOFF = float(os.environ.get("LLM_MAX_BACKOFF", "120"))
 # sleep still lets those two fire back to back, so a 15 RPM account gets
 # tripped even with a generous gap between jobs.
 #
-# 0 (the default) disables it, leaving the existing per-job sleeps as the only
-# pacing. Set LLM_RPM=15 for a model with that limit.
-RPM_LIMIT = float(os.environ.get("LLM_RPM", "0"))
+# This is now the ONLY pacing. A hardcoded 2-4s per-job sleep used to sit in
+# main() for OpenRouter's free tier; it was costing ~43% of the runtime on a
+# gateway that does not need it, and it paced the wrong unit anyway. Set
+# LLM_RPM=15 for a model with that limit; 0 (the default) runs flat out and
+# leans on call_model()'s 429 backoff if a limit is hit.
+RPM_LIMIT = float(_setting("LLM_RPM", "rpm", "0"))
 MIN_REQUEST_INTERVAL = 60.0 / RPM_LIMIT if RPM_LIMIT > 0 else 0.0
 
 _last_request_at = 0.0
@@ -271,12 +328,16 @@ DRY_RUN = os.environ.get("MATCHER_DRY_RUN", "").lower() in ("1", "true", "yes")
 #   MATCHER_CLASSIFIER=mistral.mistral-large-3-675b-instruct \
 #   MATCHER_SCORER=mistral.mistral-large-3-675b-instruct \
 #   python3 scripts/matcher.py
-CLASSIFIER_MODEL = os.environ.get("MATCHER_CLASSIFIER", "nvidia/nemotron-3.5-lightning:free").strip()
-SCORER_MODEL = os.environ.get("MATCHER_SCORER", "nvidia/nemotron-3-ultra-550b-a55b:free").strip()
+CLASSIFIER_MODEL = _setting("MATCHER_CLASSIFIER", "classifier", "nvidia/nemotron-3.5-lightning:free")
+SCORER_MODEL = _setting("MATCHER_SCORER", "scorer", "nvidia/nemotron-3-ultra-550b-a55b:free")
+
+RESUME_DIR = "/Users/joseph/Documents/Resume"
 
 RESUMES = {
-    "software_engineering_v1": "/Users/joseph/Documents/Resume/Chakola_Joseph_Resume_Software_Engineering.docx",
-    "mobile_v1": "/Users/joseph/Documents/Resume/Chakola_Joseph_Resume_Mobile_App_Developer.docx",
+    "software_engineering_v1": f"{RESUME_DIR}/Chakola_Joseph_Resume_Software_Engineering.docx",
+    "mobile_v1": f"{RESUME_DIR}/Chakola_Joseph_Resume_Mobile_App_Developer.docx",
+    "software_engineering_in_v1": f"{RESUME_DIR}/Chakola_Joseph_Resume_Software_Engineering_India.docx",
+    "mobile_in_v1": f"{RESUME_DIR}/Chakola_Joseph_Resume_Mobile_App_Developer_India.docx",
 }
 DEFAULT_RESUME_VERSION = "software_engineering_v1"  # fallback if classification fails/is ambiguous
 
@@ -290,8 +351,25 @@ def load_resume_text(path):
 
 
 def load_all_resumes():
-    """version -> resume text, loaded once per run."""
-    return {version: load_resume_text(path) for version, path in RESUMES.items()}
+    """version -> resume text, loaded once per run.
+
+    A missing file is skipped with a warning rather than raising: a résumé for
+    one country should not stop jobs in another from being scored. Anything
+    that ends up missing falls back to DEFAULT_RESUME_VERSION at selection
+    time, and says so per job.
+    """
+    loaded = {}
+    for version, path in RESUMES.items():
+        try:
+            loaded[version] = load_resume_text(path)
+        except Exception as e:
+            print(f"  Resume '{version}' not loaded ({type(e).__name__}): {path}")
+    if DEFAULT_RESUME_VERSION not in loaded:
+        raise RuntimeError(
+            f"Default resume '{DEFAULT_RESUME_VERSION}' could not be loaded from "
+            f"{RESUMES[DEFAULT_RESUME_VERSION]} — there is nothing to fall back to."
+        )
+    return loaded
 
 
 EXPERIENCE_CAPS = [(4, 25), (2, 45), (1, 70)]  # (min_shortfall_years, max_score)
@@ -815,6 +893,64 @@ def requires_clearance(jd_text):
     accompany them."""
     return bool(CLEARANCE_KEYWORDS.search(jd_text or ""))
 
+
+# ---------------------------------------------------------------------------
+# Per-country policy
+#
+# What differs between countries is small and well bounded: which pre-filters
+# apply, and which resumes to score against. Everything else — the prompt, the
+# experience cap, retries, the gateway — is identical, which is why this is a
+# table rather than a second script.
+#
+# The US filters are about work authorisation and are meaningless for a
+# citizen working in their own country: a sponsorship clause cannot exclude
+# someone who needs no sponsorship, and the clearance filter keys on US
+# citizenship. Running them on Indian postings would at best waste a scan and
+# at worst discard a job over a US parent company's export-control boilerplate.
+#
+# Adding a country is one entry here plus its resumes in RESUMES.
+# ---------------------------------------------------------------------------
+POLICIES = {
+    "United States": {
+        "pre_filters": (
+            ("excluded_clearance", requires_clearance,
+             "Excluded: requires security clearance / US citizenship.",
+             "requires clearance/citizenship"),
+            ("excluded_sponsorship", requires_no_sponsorship,
+             "Excluded: hard sponsorship/visa-status blocker (no sponsorship now or in the "
+             "future, OPT/CPT not accepted, or ITAR citizenship requirement).",
+             "hard sponsorship/visa blocker"),
+        ),
+        "resumes": {"mobile": "mobile_v1", "software": "software_engineering_v1"},
+    },
+    "India": {
+        "pre_filters": (),
+        "resumes": {"mobile": "mobile_in_v1", "software": "software_engineering_in_v1"},
+    },
+}
+
+DEFAULT_POLICY_LOCATION = "United States"
+
+
+def policy_for(location):
+    """Policy for a job's location, falling back to the default.
+
+    The fallback is loud rather than silent: a location with no policy means
+    jobs are being filtered and scored under another country's rules, which is
+    worth noticing the first time rather than discovering in the scores.
+    """
+    if location in POLICIES:
+        return POLICIES[location]
+    if location not in policy_for._warned:
+        policy_for._warned.add(location)
+        print(f"  No policy for location {location!r}; using "
+              f"{DEFAULT_POLICY_LOCATION} rules and resumes.")
+    return POLICIES[DEFAULT_POLICY_LOCATION]
+
+
+policy_for._warned = set()
+
+
 def classify_resume_type(jd_text):
     """Ask the cheap/fast model which resume fits this JD. Falls back to the
     default resume if the classifier fails or returns something unexpected."""
@@ -850,11 +986,12 @@ def score_job(resume_text, jd_text):
 def get_job_details(job_id):
     conn = db.get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT title, company, jd_text FROM jobs WHERE job_id = %s", (job_id,))
+    cur.execute("SELECT title, company, jd_text, location FROM jobs WHERE job_id = %s",
+                (job_id,))
     row = cur.fetchone()
     cur.close()
     conn.close()
-    return row  # (title, company, jd_text)
+    return row  # (title, company, jd_text, location)
 
 
 def save_match(job_id, result, resume_version):
@@ -880,6 +1017,12 @@ def main():
     if DRY_RUN:
         print("=== DRY RUN: scoring normally, but nothing will be written to the DB ===")
 
+    # Stated up front so a log says which gateway and models produced its
+    # scores, without having to know which env vars were set at launch.
+    print(f"=== Gateway: {DEFAULT_ROUTER} ({client.base_url}) ===")
+    print(f"=== Classifier: {CLASSIFIER_MODEL} ===")
+    print(f"=== Scorer: {SCORER_MODEL} ===")
+
     resumes = load_all_resumes()  # resume_version -> resume text, loaded once
     scored = 0
     max_passes = 1 if DRY_RUN else 5  # dry-run: one pass only — nothing gets
@@ -902,31 +1045,33 @@ def main():
                     print(f"\nDone. Scored {scored} jobs this run.")
                     return
 
-                title, company, jd_text = get_job_details(job_id)
+                title, company, jd_text, location = get_job_details(job_id)
+                policy = policy_for(location)
 
-                if requires_clearance(jd_text):
-                    save_match(
-                        job_id,
-                        {"score": 0, "missing_skills": "N/A", "reasoning": "Excluded: requires security clearance / US citizenship."},
-                        "excluded_clearance",
-                    )
-                    seen_this_run.add(job_id)
-                    progressed_this_pass += 1
-                    print(f"[excluded] {title} @ {company} — requires clearance/citizenship, skipped without scoring")
+                excluded = False
+                for marker, matches_filter, reason, label in policy["pre_filters"]:
+                    if matches_filter(jd_text):
+                        save_match(
+                            job_id,
+                            {"score": 0, "missing_skills": "N/A", "reasoning": reason},
+                            marker,
+                        )
+                        seen_this_run.add(job_id)
+                        progressed_this_pass += 1
+                        print(f"[excluded] {title} @ {company} — {label}, skipped without scoring")
+                        excluded = True
+                        break
+                if excluded:
                     continue
 
-                if requires_no_sponsorship(jd_text):
-                    save_match(
-                        job_id,
-                        {"score": 0, "missing_skills": "N/A", "reasoning": "Excluded: hard sponsorship/visa-status blocker (no sponsorship now or in the future, OPT/CPT not accepted, or ITAR citizenship requirement)."},
-                        "excluded_sponsorship",
-                    )
-                    seen_this_run.add(job_id)
-                    progressed_this_pass += 1
-                    print(f"[excluded] {title} @ {company} — hard sponsorship/visa blocker, skipped without scoring")
-                    continue
-
-                resume_version = classify_resume_type(jd_text)  # cheap model, separate quota
+                # The classifier answers mobile vs software from the JD; the
+                # country comes from the column, not from a model call.
+                kind = "mobile" if classify_resume_type(jd_text) == "mobile_v1" else "software"
+                resume_version = policy["resumes"][kind]
+                if resume_version not in resumes:
+                    print(f"  Resume '{resume_version}' unavailable for {location}; "
+                          f"falling back to {DEFAULT_RESUME_VERSION}.")
+                    resume_version = DEFAULT_RESUME_VERSION
                 resume_text = resumes[resume_version]
 
                 result = score_job(resume_text, jd_text)  # heavy model, separate quota
@@ -942,8 +1087,6 @@ def main():
                 score = result.get("score", 0)
                 status = "MATCH" if score >= MATCH_THRESHOLD else "below threshold"
                 print(f"[{score}%] {title} @ {company} ({resume_version}) — {status}")
-
-                time.sleep(random.uniform(2, 4))  # stay comfortably under 20 RPM
 
             if progressed_this_pass == 0:
                 print("No progress made this pass — remaining jobs appear to be failing persistently. Stopping here rather than looping.")

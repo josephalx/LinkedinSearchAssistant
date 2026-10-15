@@ -158,7 +158,7 @@ def main():
 
             for i, old in enumerate(pending, start=1):
                 job_id = old["job_id"]
-                title, company, jd_text = matcher.get_job_details(job_id)
+                title, company, jd_text, location = matcher.get_job_details(job_id)
 
                 if matcher.requires_clearance(jd_text):
                     new_result = {"score": 0, "missing_skills": "N/A", "reasoning": "Excluded: requires security clearance / US citizenship."}

@@ -27,8 +27,13 @@ from flask_socketio import SocketIO
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_DIR = os.path.join(PROJECT_ROOT, "scripts")
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "data"))
+sys.path.insert(0, SCRIPTS_DIR)
 import db
 import notion
+# Only for the preset NAMES, to validate a request and fill the dropdown. The
+# preset contents live in matcher.py and are read by the subprocess at launch,
+# so editing a model there takes effect on the next run with no server restart.
+import matcher
 
 app = Flask(__name__)
 CORS(app)
@@ -183,7 +188,14 @@ def run_scraper_background(location=DEFAULT_SCRAPER_LOCATION,
     scraper_lock.release()
 
 
-def run_matcher_background():
+# Presets are defined in matcher.py (see MATCHER_PRESETS there). This module
+# only needs their names: the subprocess resolves the contents itself, so a
+# model change there needs no server restart.
+MATCHER_PRESETS = matcher.MATCHER_PRESETS
+DEFAULT_MATCHER_PRESET = matcher.DEFAULT_MATCHER_PRESET
+
+
+def run_matcher_background(preset=DEFAULT_MATCHER_PRESET):
     """Runs matcher.py as a subprocess with MATCHER_DRY_RUN=1 forced on —
     dashboard-triggered runs always score without writing to the DB. A plain
     `python3 matcher.py` from the terminal (no env var set) still runs the
@@ -194,6 +206,15 @@ def run_matcher_background():
 
     env = dict(os.environ)
     env.setdefault("MATCHER_DRY_RUN", "1")  # only fills in if start_api.sh didn't already set it
+
+    # Only the preset NAME is passed; matcher.py resolves router, models and
+    # pacing from its own table at launch. Any LLM_ROUTER / MATCHER_SCORER /
+    # MATCHER_CLASSIFIER / LLM_RPM inherited from start_api.sh would override
+    # the preset there, so they are cleared — a gateway picked in the UI is an
+    # explicit instruction and should not lose to a shell default.
+    env["MATCHER_PRESET"] = preset
+    for leaked in ("LLM_ROUTER", "MATCHER_CLASSIFIER", "MATCHER_SCORER", "LLM_RPM"):
+        env.pop(leaked, None)
 
     with open(MATCHER_LOG, "w") as log:
         proc = subprocess.Popen(
@@ -371,11 +392,23 @@ def pending_count():
 @app.route("/api/run-matcher", methods=["POST"])
 @require_token
 def run_matcher():
+    payload = request.get_json(silent=True) or {}
+    preset = payload.get("preset", DEFAULT_MATCHER_PRESET)
+    if preset not in MATCHER_PRESETS:
+        return jsonify({"error": f"unsupported preset: {preset!r}"}), 400
+
     acquired = matcher_lock.acquire(blocking=False)
     if not acquired:
         return jsonify({"error": "matcher already running"}), 409
-    threading.Thread(target=run_matcher_background, daemon=True).start()
-    return jsonify({"status": "started", "dry_run": dry_run_enabled("MATCHER_DRY_RUN")})
+    threading.Thread(target=run_matcher_background,
+                     kwargs={"preset": preset}, daemon=True).start()
+    chosen = MATCHER_PRESETS[preset]
+    return jsonify({"status": "started",
+                    "dry_run": dry_run_enabled("MATCHER_DRY_RUN"),
+                    "preset": preset,
+                    "router": chosen["router"],
+                    "classifier": chosen["classifier"],
+                    "scorer": chosen["scorer"]})
 
 
 @app.route("/api/stop-matcher", methods=["POST"])

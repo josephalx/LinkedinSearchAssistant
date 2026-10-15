@@ -149,10 +149,11 @@
     min-width: 34px; color: var(--text);
   }
   table { width: 100%; border-collapse: collapse; font-size: 15px; table-layout: fixed; }
-  thead th:nth-child(1) { width: 15%; }
-  thead th:nth-child(2) { width: 45%; }
-  thead th:nth-child(3) { width: 25%; }
-  thead th:nth-child(4) { width: 15%; }
+  thead th:nth-child(1) { width: 14%; }
+  thead th:nth-child(2) { width: 40%; }
+  thead th:nth-child(3) { width: 22%; }
+  thead th:nth-child(4) { width: 12%; }
+  thead th:nth-child(5) { width: 12%; }
   thead th {
     text-align: left; font-weight: 500; color: var(--text-dim);
     font-size: 13px; padding: 10px;
@@ -175,12 +176,7 @@
   .score-bar { width: 3px; height: 18px; border-radius: 1px; flex-shrink: 0; }
   .score-num { font-family: 'IBM Plex Mono', monospace; font-weight: 500; }
   .company { color: var(--text-dim); }
-  .loc-tag {
-    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
-    color: var(--text-dim); border: 1px solid var(--border-strong);
-    border-radius: 10px; padding: 1px 7px; margin-left: 6px;
-    white-space: nowrap;
-  }
+  .location { color: var(--text-dim); font-size: 13px; }
   .resume-tag {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 13px; color: var(--text-faint);
@@ -295,14 +291,16 @@
   }
   @media (max-width: 640px) {
     body { padding: 1.25rem 1rem 3rem; }
-    thead th:nth-child(3), tbody td:nth-child(3) { display: none; }
-    /* The Company column is hidden here, but the detail row's cell still spans
-       all 4. Under table-layout:fixed the declared widths then sum to 75% and
-       the leftover 25% goes to a phantom track, squeezing every visible column
-       the moment a row expands. Re-declare the three survivors to total 100%. */
+    thead th:nth-child(3), tbody td:nth-child(3),
+    thead th:nth-child(4), tbody td:nth-child(4) { display: none; }
+    /* Company and Location are hidden here, but the detail row's cell still
+       spans all 5. Under table-layout:fixed the declared widths would then sum
+       to 66% and the leftover would go to phantom tracks, squeezing every
+       visible column the moment a row expands. Re-declare the survivors to
+       total 100%. */
     thead th:nth-child(1) { width: 20%; }
     thead th:nth-child(2) { width: 60%; }
-    thead th:nth-child(4) { width: 20%; }
+    thead th:nth-child(5) { width: 20%; }
     .stats { grid-template-columns: repeat(2, 1fr); }
     .prompt { font-size: 13px; }
     h1 { font-size: 22px; }
@@ -373,6 +371,7 @@
         <th data-sort="score">Score</th>
         <th data-sort="title">Title</th>
         <th data-sort="company">Company</th>
+        <th data-sort="location">Location</th>
         <th>Resume</th>
       </tr>
     </thead>
@@ -383,10 +382,6 @@
 <script>
 const API_URL = "http://josephs-macbook-pro.local:5050/api/matches";
 let DATA = [];
-// How many distinct locations the current data holds. Drives whether the
-// location filter and the per-row tag are shown at all — with one country
-// they are noise.
-let seenLocations = 1;
 let sortKey = "score";
 let sortDir = -1;
 // Keyed by job_id, not by row position — filters and sorts reshuffle the
@@ -430,9 +425,6 @@ function populateLocationFilter() {
   const current = sel.value;
   const inData = DATA.map(d => d.location).filter(Boolean);
   const options = [...new Set(["United States", ...inData])].sort();
-  // Drives the per-row tag: with a single location it would repeat the same
-  // value on every row and say nothing.
-  seenLocations = new Set(inData).size;
   sel.innerHTML = '<option value="all">All locations</option>' +
     options.map(l => '<option value="' + l + '">' + l + '</option>').join("");
   sel.value = options.includes(current) || current === "all" ? current : "all";
@@ -524,13 +516,12 @@ function render() {
       '<td><div class="score-cell"><span class="score-bar" style="background:' + t.bar + '"></span>' +
       '<span class="score-num" style="color:' + t.text + '">' + d.score + '%</span></div></td>' +
       '<td>' + d.title + '</td>' +
-      '<td class="company">' + d.company +
-        (d.location && seenLocations > 1
-          ? ' <span class="loc-tag">' + d.location + '</span>' : '') + '</td>' +
+      '<td class="company">' + d.company + '</td>' +
+      '<td class="location">' + (d.location || "\u2014") + '</td>' +
       '<td><span class="resume-tag">' + resumeLabel(d.resume_version) + '</span></td>' +
       '</tr>';
     if (isOpen) {
-      rows += '<tr class="detail-row"><td colspan="4"><div class="detail-content">' +
+      rows += '<tr class="detail-row"><td colspan="5"><div class="detail-content">' +
         '<div class="detail-head"><span class="label">' + d.title + '</span>' +
         '<button class="copy-btn" data-copy-text="' + d.title.replace(/"/g, '&quot;') + '" title="Copy title" aria-label="Copy title">' +
         '<svg viewBox="0 0 16 16" width="13" height="13" fill="none"><rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M3 10V3.5A1.5 1.5 0 0 1 4.5 2H10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +

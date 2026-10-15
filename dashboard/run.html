@@ -196,6 +196,11 @@
     <div class="run-section">
       <button class="run-btn" id="matcher-run">Run matcher</button>
       <button class="run-btn stop-btn" id="matcher-stop" disabled>Stop</button>
+      <label class="run-label" for="matcher-preset">gateway</label>
+      <select class="run-select" id="matcher-preset">
+        <option value="openrouter">OpenRouter</option>
+        <option value="bedrock">Bedrock</option>
+      </select>
       <span class="run-indicator" id="matcher-indicator"></span>
       <span class="chip pending-chip" id="matcher-pending-chip">... pending</span>
     </div>
@@ -243,6 +248,9 @@ function setupRunner(name, opts) {
   // Only the scraper has these; the matcher runner shares this function.
   const locationSel = document.getElementById(name + "-location");
   const daysSel = document.getElementById(name + "-days");
+  // Matcher only — a gateway carries its models with it, chosen server side,
+  // because model IDs are not portable between gateways.
+  const presetSel = document.getElementById(name + "-preset");
   let pendingCount = null;
 
   async function refreshPendingCount() {
@@ -300,6 +308,7 @@ function setupRunner(name, opts) {
     // them editable would suggest a change applies to the run in progress.
     if (locationSel) locationSel.disabled = isRunning;
     if (daysSel) daysSel.disabled = isRunning;
+    if (presetSel) presetSel.disabled = isRunning;
     if (isRunning) {
       indicator.textContent = "running...";
       indicator.classList.add("active");
@@ -313,6 +322,8 @@ function setupRunner(name, opts) {
     if (locationSel && savedLoc) locationSel.value = savedLoc;
     const savedDays = localStorage.getItem("scraper_days");
     if (daysSel && savedDays) daysSel.value = savedDays;
+    const savedPreset = localStorage.getItem("matcher_preset");
+    if (presetSel && savedPreset) presetSel.value = savedPreset;
   } catch (e) { /* ignore */ }
 
   socket.on(name + "_log", (data) => appendLog(data.line));
@@ -334,9 +345,11 @@ function setupRunner(name, opts) {
       const body = {};
       if (locationSel) body.location = locationSel.value;
       if (daysSel) body.days_back = parseInt(daysSel.value, 10);
+      if (presetSel) body.preset = presetSel.value;
       try {
         if (locationSel) localStorage.setItem("scraper_location", locationSel.value);
         if (daysSel) localStorage.setItem("scraper_days", daysSel.value);
+        if (presetSel) localStorage.setItem("matcher_preset", presetSel.value);
       } catch (e) { /* private mode — the selects just won't be remembered */ }
 
       const resp = await fetch(API_BASE + "/api/run-" + name, {
